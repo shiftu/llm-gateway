@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -25,22 +23,30 @@ const defaultAddr = "127.0.0.1:7421"
 // in under one minute from download. Persistent token still requires setting
 // the env var.
 func runStart() int {
-	token := os.Getenv("LLM_GATEWAY_TOKEN")
-	if token == "" {
-		t, err := generateEphemeralToken()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to mint ephemeral token: %v\n", err)
-			return 1
-		}
-		token = t
-		fmt.Println("LLM_GATEWAY_TOKEN not set — minted an ephemeral token for this session:")
+	cfgDir, err := defaultConfigDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not resolve config dir: %v\n", err)
+		return 1
+	}
+	token, source, err := resolveToken(cfgDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not resolve token: %v\n", err)
+		return 1
+	}
+	switch source {
+	case tokenSourceEnv:
+		log.Print("token source: LLM_GATEWAY_TOKEN env")
+	case tokenSourceFile:
+		log.Print("token source: ", cfgDir, "/token")
+	case tokenSourceEphemeral:
+		fmt.Println("No persistent token found — minted an ephemeral one for this session:")
 		fmt.Println()
 		fmt.Println("  ", token)
 		fmt.Println()
 		fmt.Println("OpenAI clients:    Authorization: Bearer", token)
 		fmt.Println("Anthropic clients: x-api-key:", token)
 		fmt.Println()
-		fmt.Println("Set LLM_GATEWAY_TOKEN env to persist a stable token across restarts.")
+		fmt.Println("Run `llm-gateway init` to persist a stable token across restarts.")
 		fmt.Println()
 	}
 
@@ -67,14 +73,6 @@ func runStart() int {
 	}
 	log.Print("llm-gateway shut down cleanly")
 	return 0
-}
-
-func generateEphemeralToken() (string, error) {
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "lgw_ephem_" + base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // loadProviderFromEnv reads a single optional upstream provider config from

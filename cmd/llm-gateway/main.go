@@ -17,6 +17,8 @@ func run(args []string) int {
 		return 2
 	}
 	switch args[0] {
+	case "init":
+		return runInit(args[1:])
 	case "start":
 		return runStart()
 	case "version", "-v", "--version":
@@ -36,6 +38,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "Usage: llm-gateway <subcommand>")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Subcommands:")
+	fmt.Fprintln(os.Stderr, "  init     Generate a persistent bearer token + print agent config")
 	fmt.Fprintln(os.Stderr, "  start    Run the gateway HTTP + MCP server")
 	fmt.Fprintln(os.Stderr, "  version  Print version and exit")
 	fmt.Fprintln(os.Stderr, "  help     Show this message")
