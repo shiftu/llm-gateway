@@ -15,3 +15,5 @@ __pycache__/
 target/
 .gstack/
 .env.dev
+/llm-gateway
+*.test
