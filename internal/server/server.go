@@ -3,28 +3,124 @@ package server
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/panda/llm-gateway/internal/provider"
 )
 
 // Server composes the bearer-auth middleware with the inbound mux. v0.1
-// scope: 2 routes (OpenAI + Anthropic). Future revisions add more routes
-// without changing this assembly point.
+// scope: 2 routes (OpenAI + Anthropic) + optional upstream provider for
+// pass-through. When prov is nil the handlers return stub JSON (offline
+// dev / smoke). When prov is set, R2 pass-through forwards bytes to the
+// upstream provider's matching protocol endpoint.
 type Server struct {
-	auth *Auth
-	mux  *http.ServeMux
+	auth     *Auth
+	provider *provider.Provider // nil = stub mode
+	mux      *http.ServeMux
 }
 
-// NewServer builds the mux and wires both inbound endpoints.
-func NewServer(token string) *Server {
+// NewServer builds the mux and wires both inbound endpoints. prov can be
+// nil to run in stub mode (Task 1 behaviour preserved for tests/smoke).
+func NewServer(token string, prov *provider.Provider) *Server {
 	s := &Server{
-		auth: NewAuth(token),
-		mux:  http.NewServeMux(),
+		auth:     NewAuth(token),
+		provider: prov,
+		mux:      http.NewServeMux(),
 	}
-	s.mux.HandleFunc("/v1/chat/completions", HandleChatCompletions)
-	s.mux.HandleFunc("/v1/messages", HandleMessages)
+	s.mux.HandleFunc("/v1/chat/completions", s.dispatchChatCompletions)
+	s.mux.HandleFunc("/v1/messages", s.dispatchMessages)
 	return s
+}
+
+// dispatchChatCompletions sends to passthrough when a provider is wired,
+// otherwise returns the Task-1 stub. Same shape for /v1/messages below.
+func (s *Server) dispatchChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if s.provider == nil {
+		HandleChatCompletions(w, r)
+		return
+	}
+	s.passthroughOpenAI(w, r)
+}
+
+func (s *Server) dispatchMessages(w http.ResponseWriter, r *http.Request) {
+	if s.provider == nil {
+		HandleMessages(w, r)
+		return
+	}
+	s.passthroughAnthropic(w, r)
+}
+
+func (s *Server) passthroughOpenAI(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.provider.OpenAIRequest(r.Context(), r.Body)
+	if err != nil {
+		writeUpstreamError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+	pipeUpstream(w, resp)
+}
+
+func (s *Server) passthroughAnthropic(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.provider.AnthropicRequest(r.Context(), r.Body)
+	if err != nil {
+		writeUpstreamError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+	pipeUpstream(w, resp)
+}
+
+// pipeUpstream copies the upstream HTTP response onto the inbound
+// ResponseWriter with byte fidelity. SSE streams are flushed per chunk so
+// the client sees tokens as they arrive (spike F3 / F-Q16).
+func pipeUpstream(w http.ResponseWriter, resp *http.Response) {
+	for _, h := range []string{"Content-Type", "Cache-Control"} {
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		flushAndCopy(w, resp.Body)
+		return
+	}
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func flushAndCopy(w http.ResponseWriter, r io.Reader) {
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			_, _ = w.Write(buf[:n])
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// writeUpstreamError surfaces a structured error for upstream-side failures
+// (timeout, network, provider returned non-2xx pre-handler errors). Uses
+// the same F-DX-05 shape as auth errors for uniformity.
+func writeUpstreamError(w http.ResponseWriter, err error) {
+	w.Header().Set("Content-Type", "application/json")
+	if errors.Is(err, provider.ErrProtocolUnsupported) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":{"type":"no_route","message":"provider does not support this inbound protocol natively","fix":"register a provider with the matching base_url, or wait for IR translation in v0.2"}}`)
+		return
+	}
+	w.WriteHeader(http.StatusBadGateway)
+	_, _ = io.WriteString(w, `{"error":{"type":"upstream_error","message":"failed to reach upstream provider","fix":"check provider base_url + network; tail recent request_logs for details"}}`)
 }
 
 // Handler returns the fully composed http.Handler — auth middleware wrapping

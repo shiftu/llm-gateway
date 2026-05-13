@@ -14,7 +14,7 @@ import (
 // §4 Task 1's end-to-end pipe: NewServer composes Auth middleware + mux +
 // the two stub handlers, exposing Handler() for httptest.NewServer.
 func TestServer_AssembledRoutes(t *testing.T) {
-	srv := NewServer("test-token")
+	srv := NewServer("test-token", nil)
 	s := httptest.NewServer(srv.Handler())
 	defer s.Close()
 
@@ -60,7 +60,7 @@ func TestServer_AssembledRoutes(t *testing.T) {
 // We bind to :0 (kernel-chosen port), then cancel the context and ensure
 // Run returns cleanly (not via os.Exit).
 func TestServer_Run_GracefulShutdown(t *testing.T) {
-	srv := NewServer("test-token")
+	srv := NewServer("test-token", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	runErr := make(chan error, 1)

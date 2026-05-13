@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/panda/llm-gateway/internal/provider"
 	"github.com/panda/llm-gateway/internal/server"
 )
 
@@ -51,7 +52,13 @@ func runStart() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	srv := server.NewServer(token)
+	prov := loadProviderFromEnv()
+	srv := server.NewServer(token, prov)
+	if prov != nil {
+		log.Printf("upstream provider: %s (kind=%s)", prov.Name, prov.Kind)
+	} else {
+		log.Print("no provider configured — running in stub mode (set LLM_GATEWAY_PROVIDER_API_KEY to enable real upstream)")
+	}
 
 	log.Printf("llm-gateway %s listening on http://%s", version, addr)
 	if err := srv.Run(ctx, addr); err != nil {
@@ -68,4 +75,35 @@ func generateEphemeralToken() (string, error) {
 		return "", err
 	}
 	return "lgw_ephem_" + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// loadProviderFromEnv reads a single optional upstream provider config from
+// env. v0.1 transient — SQLite-driven multi-provider lands in Task 4/5.
+// Returns nil when LLM_GATEWAY_PROVIDER_API_KEY is unset (stub mode).
+func loadProviderFromEnv() *provider.Provider {
+	apiKey := os.Getenv("LLM_GATEWAY_PROVIDER_API_KEY")
+	if apiKey == "" {
+		return nil
+	}
+	name := os.Getenv("LLM_GATEWAY_PROVIDER_NAME")
+	if name == "" {
+		name = "default"
+	}
+	kind := os.Getenv("LLM_GATEWAY_PROVIDER_KIND")
+	if kind == "" {
+		kind = "deepseek" // single-provider v0.1 default; matches our spike
+	}
+	openaiURL := os.Getenv("LLM_GATEWAY_PROVIDER_OPENAI_BASE_URL")
+	anthropicURL := os.Getenv("LLM_GATEWAY_PROVIDER_ANTHROPIC_BASE_URL")
+	if openaiURL == "" && anthropicURL == "" && kind == "deepseek" {
+		openaiURL = "https://api.deepseek.com"
+		anthropicURL = "https://api.deepseek.com/anthropic"
+	}
+	return &provider.Provider{
+		Name:             name,
+		Kind:             kind,
+		OpenAIBaseURL:    openaiURL,
+		AnthropicBaseURL: anthropicURL,
+		APIKey:           apiKey,
+	}
 }
