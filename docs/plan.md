@@ -1,6 +1,10 @@
 # llm-gateway — Implementation Plan
 
-> Working plan file. Used by `/plan-ceo-review`, `/plan-eng-review`, `/plan-devex-review` via the `/autoplan` chain. Design doc lineage: `~/.gstack/projects/llm-gateway/panda-main-design-20260513-040833.md`.
+> **Status: APPROVED** (autoplan D4 = option A, 2026-05-13). Approved with 42 auto-decided fixes + Task 0 Wizard-of-Oz validation. 4 user challenges (UC-1/3/4/5) explicitly declined — archived in `TODOS.md`.
+>
+> Working plan file. Reviewed by `/plan-ceo-review`, `/plan-eng-review`, `/plan-devex-review` via the `/autoplan` chain. Design doc lineage: `~/.gstack/projects/llm-gateway/panda-main-design-20260513-040833.md`. Test plan artifact: `~/.gstack/projects/llm-gateway/panda-main-test-plan-20260513-040833.md`.
+>
+> **Implementer note:** The 42 auto-decided fixes are listed in the per-phase "Auto-Decided Findings Summary" tables (CEO §end, Eng §end, DX §end), each with a Task # column. When working a Task, scan all three Summary tables for that Task # before starting — those are required modifications to the §2/§4 baselines above.
 
 **Goal:** Build an AI-native LLM proxy that exposes an OpenAI-compatible `/v1/chat/completions` endpoint for GLM + DeepSeek, with all operations (provider config, routing, usage queries) performed via MCP — no web UI, no admin CLI subcommands.
 
