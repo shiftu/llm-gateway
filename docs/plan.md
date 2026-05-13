@@ -400,7 +400,7 @@ Lessons borrowed from AI-native OSS:
 
 - ✅ `## CEO Review` — appended below
 - ✅ `## Eng Review` — appended below
-- `## DX Review` — to be appended by `/plan-devex-review`
+- ✅ `## DX Review` — appended below
 - `## Decision Audit Trail` — to be appended by `/autoplan` Phase 4
 
 ---
@@ -921,6 +921,220 @@ All 19 findings ACCEPT. Updated task list incorporates fixes; see test plan arti
 | Findings | 19 all auto-decided ACCEPT (none are user challenges) |
 | Failure modes registry | F-1 to F-19 above, mapped to tasks |
 | Status | **DONE** — eng review clean; 0 user challenges, 19 technical fixes queued for plan edit pass |
+
+---
+
+---
+
+## DX Review (Phase 3.5 — /plan-devex-review via /autoplan)
+
+### Setup
+
+- **DX scope detection:** TRUE — product is a developer tool (CLI binary + MCP server consumed by coding agents). Primary user **is** an AI agent (plus the human installing the binary).
+- **Mode (auto-decided):** DX POLISH
+- **Personas:** (1) Human developer who installs and operates; (2) AI agent (Cline / Claude Code / Cursor) which is both consumer and operator (P6 thesis).
+- **Dual voices:** `[codex-unavailable]`; Claude DX subagent ran in foreground
+- **Subagent verdict:** DX score 6.5/10; TTHW currently 12–15 min vs 5-min target; 3 critical blockers before Task 1
+- **Findings:** 15 total, all auto-decided ACCEPT (technical/process, no user-direction changes)
+
+### Step 0: DX Scope Assessment
+
+**Product type:** developer tool with dual primary users.
+
+**Developer journey (9 stages):**
+
+| # | Stage | Current friction | Target |
+|---|---|---|---|
+| 1 | Discover | (out of scope — assumes user found GitHub repo) | — |
+| 2 | Install | `curl -L .../llm-gateway-darwin-arm64 -o llm-gateway && chmod +x` | <1 min |
+| 3 | Bootstrap | `llm-gateway init` — currently no MCP-config emission | <30 sec |
+| 4 | Wire to coding agent | **MISSING** in plan — user must hand-edit Cline cfg | <1 min (auto-emit snippet) |
+| 5 | Start gateway | `llm-gateway start` | <5 sec |
+| 6 | First provider | "Hey Cline, add provider GLM with key X" via MCP | <30 sec |
+| 7 | First chat completion | Any LLM call from Cline routes through gateway | immediate |
+| 8 | Verify it worked | "Show last 5 requests" via MCP | <10 sec |
+| 9 | Stop / restart | Ctrl-C or `llm-gateway stop` | immediate |
+
+**TTHW current:** 12–15 min. **TTHW target:** <5 min. **Delta** comes from Stage 4 friction (no MCP-config emission) + Stage 6 fragility (no `--provider` flag fallback).
+
+### DX Dual Voices — Consensus Table
+
+```
+═══════════════════════════════════════════════════════════════
+  Dimension                            Claude  Codex  Consensus
+  ──────────────────────────────────── ─────── ─────── ─────────
+  1. Getting started < 5 min?          NO        N/A   single-voice: F-DX-01, F-DX-02
+  2. API/CLI naming guessable?         MOSTLY    N/A   single-voice: F-DX-03, F-DX-04
+  3. Error messages actionable?        NO        N/A   single-voice: F-DX-05, F-DX-06
+  4. Docs findable & complete?         PARTIAL   N/A   single-voice: F-DX-07, F-DX-08
+  5. Upgrade path safe?                AMBIGUOUS N/A   single-voice: F-DX-09, F-DX-10
+  6. Dev environment friction-free?    NO        N/A   single-voice: F-DX-11, F-DX-12
+═══════════════════════════════════════════════════════════════
+Source: subagent-only. [codex-unavailable].
+```
+
+### Developer Empathy Narrative (first-person)
+
+> "I downloaded the binary. I ran `init` — it asked for a token, I generated one with `openssl rand -hex 32`, stored it in `~/.config/llm-gateway/token`. I ran `start` — it's listening on `:7421`. Now what?
+>
+> The README says 'talk to your gateway via Cline.' But Cline doesn't know my gateway exists. I have to hand-edit `~/.config/cline/mcp_settings.json` and add an entry. The format isn't shown in the README. I find a Cline blog post; the JSON shape uses different keys than I expected. After 5 minutes of trial and error, Cline can see the gateway.
+>
+> Now I tell Cline: 'Add my GLM provider, the key is abc123.' Cline tries `add_provider(name='glm', kind='glm', base_url=??)`. What's the base_url for GLM? Not in any error message. Cline guesses `https://open.bigmodel.cn`. Wrong (it's `/api/paas/v4`). I correct it. Provider added.
+>
+> 'Send me a completion using glm-4-flash.' Cline tries — gets `404 no route`. Why? Because I never set an alias or default. The error doesn't tell me that. I dig through the MCP tool list and find `set_default_provider`. Set it. Try again. Works.
+>
+> Total: 18 minutes. Not the 5 I was promised."
+
+This narrative drives the 15 findings below.
+
+### Sections 1–8 (DX Passes)
+
+#### Section 1: TTHW (Time to Hello World)
+
+**Score: 4/10 → 9/10 after fixes**
+
+- **F-DX-01 (critical, both):** `init` doesn't print MCP client config snippet → user fumbles at Stage 4. → ACCEPT: `init` prints copy-pastable JSON for `claude_desktop_config.json` AND `cline_mcp_settings.json` and a `curl` smoke-test (so user can verify gateway without MCP first).
+- **F-DX-02 (high, human):** No first-class "register provider via flag" path; user is locked into MCP-via-agent for first request. → ACCEPT: add `llm-gateway init --provider glm --api-key $GLM_KEY` flag. Doesn't violate P2 (init is already a CLI subcommand).
+- **F-DX-15 (high, both):** 5-min test omits MCP client wiring. → ACCEPT: README defines the bar as "5-min happy path after MCP wiring + `init` auto-emits config snippet." Add verification step.
+
+#### Section 2: API/CLI Naming Guessability
+
+**Score: 7/10 → 9/10**
+
+- **F-DX-03 (medium, AI agent):** `set_model_alias` upserts but name doesn't signal it; `get_request` ambiguous (HTTP req? log entry?). → ACCEPT: rename `get_request` → `get_request_log`; document upsert semantics in `set_model_alias` description.
+- **F-DX-04 (high, AI agent):** `kind` enum unstated; agent might guess "GLM"/"zhipu"/"glm". → ACCEPT: enumerate valid `kind` values in tool description AND in JSON Schema (`"enum": ["glm", "deepseek"]`) so constrained-generation agents pick correctly.
+
+#### Section 3: Error Messages Actionable
+
+**Score: 4/10 → 9/10**
+
+- **F-DX-05 (high, both):** `ErrNoRoute` says "404 with hint" — hint shape undefined. Agent can't pick next action. → ACCEPT: structured error body:
+  ```json
+  {"error":{"type":"no_route","message":"No alias or default for model 'gpt-4'","fix":"Call set_model_alias(alias='gpt-4', provider='glm-prod', upstream_model='glm-4-flash') OR set_default_provider"}}
+  ```
+  Same pattern for SSRF reject (F-12), dup-name (F-5), missing token (F-6), unknown provider kind (F-DX-04).
+- **F-DX-06 (medium, both):** Upstream 401 doesn't say WHICH provider's key is bad. → ACCEPT: include `provider_name` in error body.
+
+#### Section 4: Documentation Findability
+
+**Score: 5/10 → 9/10**
+
+- **F-DX-07 (high, both):** No "Cheatsheet of prompts to paste to your agent" in README. For the AI-native thesis (P6) this is the killer feature. → ACCEPT: README §"Talk to your gateway" with 8–10 ready prompts:
+  - *"Add my GLM key abc123 as 'glm-prod' and make it the default"*
+  - *"Show me my last 20 requests"*
+  - *"How much GLM did I use today?"*
+  - *"Set 'fast' as an alias for DeepSeek's deepseek-chat model"*
+  - *"What providers do I have configured?"*
+  - *"Tail the last 5 errors"*
+  - *"Remove the 'glm-test' provider"*
+  - *"Show me request #42 in full"*
+
+  This same content doubles as the `gateway://how-to` MCP prompt resource (F-DX-13) — single source.
+- **F-DX-08 (medium, both):** No troubleshooting section. → ACCEPT: README §"When things break" — stream-mid-failure (A-2), SQLite locked (rare), token mismatch (F-6), provider 401 (F-DX-06).
+
+#### Section 5: Upgrade Path
+
+**Score: 5/10 → 8/10**
+
+- **F-DX-09 (critical, human):** Plan has contradiction — §3 v0.1 line in plan still says "API key encryption at rest — file-permission-protected, deferred to v0.2" but CEO phase A-3 pulled encryption INTO v0.1. → ACCEPT: edit §3 of plan to mark encryption-at-rest as v0.1 included. Add `user_version` PRAGMA as migration contract from day 1. Add `llm-gateway migrate` subcommand to roadmap for v0.2.
+- **F-DX-10 (medium, AI agent):** No MCP tool schema deprecation policy. Agents that hard-code tool names break on rename. → ACCEPT: state the policy explicitly: "MCP tool names and required arg names are stable within minor versions; new optional args allowed; removals require major bump."
+
+#### Section 6: Escape Hatches
+
+**Score: 4/10 → 8/10**
+
+- **F-DX-11 (high, human):** Only 2 env vars exposed (`LLM_GATEWAY_TOKEN`, `LOG_FULL_PROMPT`). HTTP listen address is hard-coded `:7421`. No request timeout knob, log retention, MCP read-only mode. → ACCEPT: standardize env vars:
+
+  | Env var | Default | Purpose |
+  |---|---|---|
+  | `LLM_GATEWAY_TOKEN` | required | Bearer token |
+  | `LLM_GATEWAY_ADDR` | `:7421` | HTTP listen address |
+  | `LLM_GATEWAY_TIMEOUT` | `120s` | Per-request timeout |
+  | `LLM_GATEWAY_LOG_RETENTION_DAYS` | `30` | Auto-purge old request_logs |
+  | `LLM_GATEWAY_LOG_FULL_PROMPT` | `0` | Log full prompts vs 200-char excerpts |
+  | `LLM_GATEWAY_MCP_READONLY` | `0` | Disable destructive MCP tools |
+  | `LLM_GATEWAY_DB_PATH` | `~/.config/llm-gateway/state.db` | SQLite location |
+  | `LLM_GATEWAY_MASTER_KEY` | required (per A-3) | Encryption-at-rest key |
+
+- **F-DX-12 (medium, AI agent):** No way for agent to distinguish read-only vs mutating MCP tools. → ACCEPT: tool description prefixes:
+  - `[read-only]` `list_providers`, `list_model_aliases`, `get_usage`, `tail_logs`, `get_request_log`, `diagnose`
+  - `[mutates state]` `add_provider`, `remove_provider`, `set_default_provider`, `set_model_alias`, `remove_model_alias`
+
+  Then `LLM_GATEWAY_MCP_READONLY=1` hides the `[mutates state]` set.
+
+#### Section 7: Agent UX (Differentiated Dimension)
+
+**Score: 6/10 → 9/10**
+
+- **F-DX-13 (critical, AI agent):** `gateway://how-to` MCP prompt resource is mentioned once in plan §2 but has no implementation task. It's THE agent onboarding doc. → ACCEPT: add **Task 7.5** before tool implementations:
+
+  > **Task 7.5: Implement `gateway://how-to` MCP prompt resource**
+  > - Returns a markdown cheatsheet with: GLM/DeepSeek base_urls + key formats, common alias patterns, decision tree ("user asked X → call tool Y"), example tool calls with verbatim shapes.
+  > - This is the same content as README §"Talk to your gateway" — embed via `//go:embed gateway-howto.md`.
+  > - Test: agent calls `prompts/get` for `gateway://how-to` and receives the markdown.
+
+- **F-DX-14 (high, AI agent):** Agent has no debug loop when MCP tool fails. No "try `tail_logs`" guidance. → ACCEPT: add **`diagnose`** MCP tool to the tool set (11 tools total now). Returns `{token_set: bool, db_writable: bool, providers_count: int, last_upstream_error: string|null, gateway_pid: int, gateway_uptime_s: int}`. Reference this tool in every structured error response.
+
+#### Section 8: Onboarding Friction
+
+**Score: 5/10 → 9/10**
+
+- **F-DX-15 (high, both):** Covered in Section 1 above.
+
+### DX Scorecard
+
+| Dimension | Current | Post-fix |
+|---|---|---|
+| TTHW | 4 | 9 |
+| API/CLI naming | 7 | 9 |
+| Error messages | 4 | 9 |
+| Documentation | 5 | 9 |
+| Upgrade path | 5 | 8 |
+| Escape hatches | 4 | 8 |
+| Agent UX | 6 | 9 |
+| Onboarding | 5 | 9 |
+| **Overall** | **5.0** | **8.75** |
+
+(Subagent's headline 6.5 was an overall feel; section-by-section it averages 5.0.)
+
+### DX Implementation Checklist
+
+Auto-decided ACCEPTs (15 items), to be folded into plan §2/§4/§7 in post-final-gate edit pass:
+
+| # | Severity | Action | Task |
+|---|---|---|---|
+| F-DX-01 | crit | `init` prints MCP config snippets + curl smoke-test | Task 11 |
+| F-DX-02 | high | `init --provider glm --api-key X` flag | Task 11 |
+| F-DX-03 | med | Rename `get_request` → `get_request_log`; document upsert in `set_model_alias` | Tasks 9/10 |
+| F-DX-04 | high | `kind` enum in JSON Schema + tool description | Task 8 |
+| F-DX-05 | high | Structured error body with `fix` field | Tasks 1/5/6/8 |
+| F-DX-06 | med | Include `provider_name` in upstream-error body | Task 6 |
+| F-DX-07 | high | README cheatsheet of 8–10 prompts | Task 13 |
+| F-DX-08 | med | README troubleshooting section | Task 13 |
+| F-DX-09 | crit | Correct §3 v0.1 line re encryption; add `user_version` PRAGMA | §3 + Task 4 |
+| F-DX-10 | med | State MCP tool stability policy | §3 |
+| F-DX-11 | high | Standardize 8 env vars (table above) | All tasks |
+| F-DX-12 | med | `[read-only]` / `[mutates state]` prefixes; `MCP_READONLY` gates writers | Tasks 8/9/10 |
+| F-DX-13 | crit | New Task 7.5: `gateway://how-to` prompt resource | new Task 7.5 |
+| F-DX-14 | high | New `diagnose` MCP tool (11th tool); referenced in errors | Task 10 |
+| F-DX-15 | high | Reframe 5-min test as post-MCP-wiring; add verification step | Task 13 |
+
+### DX Completion Summary
+
+| Element | Status |
+|---|---|
+| DX scope detected | YES (developer tool, agent-as-user) |
+| Mode | DX POLISH (auto-decided) |
+| Dual voices | Subagent ran; Codex `[codex-unavailable]` |
+| Subagent verdict | 6.5/10 overall; section-by-section 5.0 → 8.75 post-fix |
+| Developer journey map | 9-stage table above |
+| Developer empathy narrative | First-person 18-min walkthrough above |
+| DX scorecard | 8 dimensions scored before/after |
+| TTHW assessment | 12–15 min current → <5 min target after F-DX-01/02/15 |
+| Findings | 15 all auto-decided ACCEPT |
+| New tasks added | Task 7.5 (`gateway://how-to`), expanded Tasks 11/13 |
+| New MCP tool added | `diagnose` (brings count to 11) |
+| Status | **DONE** — DX review complete; 0 user challenges; 15 technical/process improvements queued |
 
 ---
 
