@@ -401,7 +401,7 @@ Lessons borrowed from AI-native OSS:
 - ✅ `## CEO Review` — appended below
 - ✅ `## Eng Review` — appended below
 - ✅ `## DX Review` — appended below
-- `## Decision Audit Trail` — to be appended by `/autoplan` Phase 4
+- ✅ `## Decision Audit Trail` — appended below
 
 ---
 
@@ -1135,6 +1135,156 @@ Auto-decided ACCEPTs (15 items), to be folded into plan §2/§4/§7 in post-fina
 | New tasks added | Task 7.5 (`gateway://how-to`), expanded Tasks 11/13 |
 | New MCP tool added | `diagnose` (brings count to 11) |
 | Status | **DONE** — DX review complete; 0 user challenges; 15 technical/process improvements queued |
+
+---
+
+---
+
+## Decision Audit Trail (autoplan Phase 4)
+
+**Important caveat:** Codex was `[codex-unavailable]` throughout. All "dual voices" reduced to single-voice Claude subagent. Per autoplan rules, single critical findings from one voice are flagged regardless — but the cross-model consensus check that normally validates findings was absent. Treat subagent findings as "best independent take" rather than "two agents converged."
+
+### Decisions Made: 46 total
+
+- **42 auto-decided** (12 CEO + 19 Eng + 15 DX – 1 deduplication for UC-2 which is constructive add → auto-accept = 45 auto, but A-1 = UC-4 is a duplicate counted once)
+- **0 taste decisions** (no close-approach forks emerged at sub-section level beyond the architecture choice already decided in D3)
+- **4 user challenges** (UC-1, UC-3, UC-4, UC-5) — gated to user at this approval step
+- **1 reframed UC** (UC-2 P6 validation Wizard-of-Oz) auto-accepted as constructive add, not a direction change
+
+### Auto-Decided Decision Log
+
+#### CEO Phase (12 auto-decided)
+
+| # | Decision | Classification | Principle | Rationale |
+|---|---|---|---|---|
+| A-2 | Document streaming non-retry in README | mechanical | P1 completeness | User-visible behavior must be documented |
+| A-3 | Pull XChaCha20 encryption into v0.1 as Task 4.5 | mechanical | P1 + P2 boil-the-lake | OSS HN landmine; ~50 LOC fix; blast-radius small |
+| A-4 | Add empty-messages test to Task 1 | mechanical | P1 | Missing edge case test |
+| A-5 | Document tool_calls pass-through in §8 NOT in scope | mechanical | P5 explicit | Removes ambiguity for future contributors |
+| A-6 | Rename `internal/http/` → `internal/server/` | mechanical | P5 | Reduces stdlib name collision in mental parsing |
+| A-7 | Add stream-cancel-mid-body test to Task 6 | mechanical | P1 | Missing edge case test |
+| A-8 | Router fuzz test → defer v0.3 | mechanical | P3 pragmatic | Single-user scope; diminishing returns v0 |
+| A-9 | SSE load test → defer v0.3 | mechanical | P3 | Single-user scope; not the bottleneck v0 |
+| A-10 | prompt_excerpt covers v0 debug; full UI → UC-3 | mechanical | P1 + P3 | Excerpt is the 80% case |
+| A-11 | `examples/smoke.sh` smoke script to Task 13 | mechanical | P1 | Release-artifact verification gap |
+| A-12 | Add §0 "Why now, why us" positioning | mechanical | P1 | Competitive risk acknowledgment |
+| A-13 | Tech Stack: 3-line Go-vs-TS rationale | mechanical | P5 | Removes "why not Bun?" anonymous question |
+
+#### Eng Phase (19 auto-decided)
+
+| # | Decision | Classification | Principle |
+|---|---|---|---|
+| F-1 | errgroup + root ctx + SIGINT handling (Task 1) | mechanical | P1 + P5 |
+| F-2 | Router reads store every request (Task 5) | mechanical | P5 explicit |
+| F-3 | Provider snapshot into request ctx (Task 5/6) | mechanical | P5 |
+| F-4 | SQLite DSN: WAL + busy_timeout=5s + NORMAL (Task 4) | mechanical | P5 |
+| F-5 | `add_provider` dup name → structured error (Task 8) | mechanical | P5 |
+| F-6 | `init` idempotent; `start` fails fast on missing token | mechanical | P1 |
+| F-7 | Upstream HTTP uses `r.Context()` | mechanical | P5 |
+| F-8 | Golden-file SSE replay tests | mechanical | P1 |
+| F-9 | Versioned schema + seeded migration test | mechanical | P1 |
+| F-10 | MCP tool arg validation tests | mechanical | P1 |
+| F-11 | Orphaned alias → ErrNoRoute test | mechanical | P1 |
+| F-12 | SSRF allowlist (https + non-private only) (Task 8) | mechanical | P1 + security |
+| F-13 | Parameterized SQL queries everywhere | mechanical | P5 + security |
+| F-14 | Token file 0600; env var override | mechanical | P5 |
+| F-15 | 2h GLM live spike + chunk normalization (pre-Task 3) | mechanical | P3 pragmatic |
+| F-16 | mcp-go: budget 1 day; document fallback | mechanical | P3 |
+| F-17 | Cross-compile CI + pin sqlite version | mechanical | P1 + P5 |
+| F-18 | 5-step shutdown sequence (Task 1/7/11) | mechanical | P1 + P5 |
+| F-19 | Async log writer + drop-oldest backpressure (Task 6) | mechanical | P1 + P3 |
+
+#### DX Phase (15 auto-decided)
+
+| # | Decision | Classification | Principle |
+|---|---|---|---|
+| F-DX-01 | `init` prints MCP config snippets + curl smoke (Task 11) | mechanical | P1 |
+| F-DX-02 | `init --provider glm --api-key X` flag (Task 11) | mechanical | P5 |
+| F-DX-03 | Rename `get_request` → `get_request_log`; doc upsert | mechanical | P5 |
+| F-DX-04 | `kind` enum in JSON Schema + tool description | mechanical | P5 |
+| F-DX-05 | Structured error body with `fix` field | mechanical | P1 |
+| F-DX-06 | Include `provider_name` in upstream-error body | mechanical | P1 |
+| F-DX-07 | README cheatsheet of 8–10 prompts (Task 13) | mechanical | P1 |
+| F-DX-08 | README troubleshooting section (Task 13) | mechanical | P1 |
+| F-DX-09 | Correct §3 v0.1 line re encryption; `user_version` PRAGMA | mechanical | P5 |
+| F-DX-10 | State MCP tool stability policy in §3 | mechanical | P5 |
+| F-DX-11 | Standardize 8 env vars | mechanical | P5 |
+| F-DX-12 | `[read-only]` / `[mutates state]` prefixes; `MCP_READONLY` | mechanical | P5 + security |
+| F-DX-13 | New Task 7.5: `gateway://how-to` prompt resource | mechanical | P1 |
+| F-DX-14 | New `diagnose` MCP tool (11th tool) | mechanical | P1 (boil-the-lake within scope) |
+| F-DX-15 | Reframe 5-min test post-MCP-wiring + verification | mechanical | P5 |
+
+#### Constructive Add (1, reframed from UC-2)
+
+| # | Decision | Classification | Principle |
+|---|---|---|---|
+| UC-2→A | Add Task 0: 30-min Wizard-of-Oz validating P6 thesis (MCP vs YAML editing) before Task 1 | constructive | P3 pragmatic + P1 |
+
+### Cross-Phase Themes
+
+Where 2+ phases independently flagged the same concern (high-confidence signal):
+
+**Theme 1: "Structured errors with fix hints"** — flagged by CEO (A-2 documents non-retry), Eng (F-5 dup-name structured error), and DX (F-DX-05/06 actionable error bodies). Consensus: every error path returns `{error: {type, message, fix, provider_name?}}` JSON shape. Implementation cuts across Tasks 1, 5, 6, 8.
+
+**Theme 2: "Encryption at rest as v0.1 not v0.2"** — CEO (A-3) pulled it in, Eng (F-9) added versioned schema as enabler, DX (F-DX-09) caught plan-text contradiction. Consensus: ship encrypted-at-rest in v0.1 with `LLM_GATEWAY_MASTER_KEY` env var.
+
+**Theme 3: "stdio MCP limits multi-agent value prop"** — CEO (UC-4 → user challenge), Eng (F-1 lifecycle coordination assumes single-channel), DX (F-DX-13 `gateway://how-to` resource undermined if multiple agents can't share state). Consensus: deeply tied to UC-4 final-gate decision.
+
+**Theme 4: "Test-before-code spikes"** — Eng (F-15 GLM live 2h spike) + DX (UC-2-reframed Wizard-of-Oz before Task 1) + Eng (F-16 mcp-go selection spike). Consensus: ~3.5h of pre-Task-1 validation work needed; previously implicit, now explicit.
+
+### Deferred to TODOS.md
+
+| Item | Source | Defer to | Reason |
+|---|---|---|---|
+| Router fuzz / property tests | A-8 | v0.3 | Single-user scope; not bottleneck |
+| SSE load tests | A-9 | v0.3 | Single-user scope |
+| Read-only UI dashboard | UC-3 (if user vetoes) | v0.2 (contingent) | P2 violation unless final-gate flips |
+| HTTP/SSE MCP transport | UC-4 (if user vetoes pull-in) | v0.2 | Current OQ #8 default |
+| Chinese-provider-first positioning | UC-5 (if user vetoes) | post-v0.1 | Reframe doesn't affect MVP code |
+| LiteLLM-shim alternative | UC-1 (if user vetoes) | never (or replace plan) | Wholly different project |
+
+### Pre-Gate Verification Checklist
+
+Phase 1 (CEO):
+- [x] Premise challenge — D2 confirmed; subagent challenged subset → UC-2/UC-5
+- [x] All review sections 1–10 have findings or examined-and-nothing-flagged statements
+- [x] Error & Rescue Registry — CEO §2 table
+- [x] Failure Modes Registry — combination of CEO §2/§4 + Eng F-1..F-19
+- [x] "NOT in scope" — plan §8 + A-5 tool_calls addition
+- [x] "What already exists" — plan §9
+- [x] Dream state delta — CEO §0C (~30% of 12-month ideal)
+- [x] Completion Summary — CEO end
+- [x] Dual voices ran — subagent ran; Codex `[codex-unavailable]`
+- [x] CEO consensus table — produced (single-voice columns)
+
+Phase 2 (Design): SKIPPED per Phase 0 (no UI scope).
+
+Phase 3 (Eng):
+- [x] Scope challenge with code analysis — Eng Step 0
+- [x] Architecture ASCII diagram — Eng §1 augmented
+- [x] Test diagram codepaths × coverage — Eng §3 + artifact
+- [x] Test plan artifact on disk — `~/.gstack/projects/llm-gateway/panda-main-test-plan-20260513-040833.md`
+- [x] "NOT in scope" — Eng §8 ratifies plan §8
+- [x] "What already exists" — Eng review references plan §9
+- [x] Failure modes registry — F-1..F-19 mapped to tasks
+- [x] Completion Summary — Eng end
+- [x] Dual voices ran — subagent only
+- [x] Eng consensus table — produced
+
+Phase 3.5 (DX):
+- [x] 8 DX dimensions scored before/after
+- [x] Developer journey map — 9-stage table
+- [x] Developer empathy narrative — 18-min first-person walkthrough
+- [x] TTHW assessment — 12–15 min current → <5 min target
+- [x] DX Implementation Checklist — 15 items table
+- [x] Dual voices ran — subagent only
+- [x] DX consensus table — produced
+
+Cross-phase: themes section above.
+
+Audit trail: this section (not empty).
+
+All checklist items: ✅. Proceed to gate.
 
 ---
 
