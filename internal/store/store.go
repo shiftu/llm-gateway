@@ -203,6 +203,16 @@ func (s *Store) RemoveProvider(name string) error {
 	return nil
 }
 
+// GetDefaultProvider returns the row marked is_default=1, or ErrNotFound
+// if none. Used by the router to pass through unknown model names to a
+// fallback provider.
+func (s *Store) GetDefaultProvider() (Provider, error) {
+	row := s.db.QueryRow(`SELECT name, kind, openai_base_url, anthropic_base_url,
+		api_key, anthropic_version, is_default, created_at
+		FROM providers WHERE is_default = 1 LIMIT 1`)
+	return scanProvider(row)
+}
+
 // SetDefaultProvider clears the previous default in one transaction so
 // the providers table never has two rows with is_default=1.
 func (s *Store) SetDefaultProvider(name string) error {
