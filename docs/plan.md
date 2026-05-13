@@ -399,7 +399,7 @@ Lessons borrowed from AI-native OSS:
 ## §10. Sections to be filled by review phases
 
 - ✅ `## CEO Review` — appended below
-- `## Eng Review` — to be appended by `/plan-eng-review`
+- ✅ `## Eng Review` — appended below
 - `## DX Review` — to be appended by `/plan-devex-review`
 - `## Decision Audit Trail` — to be appended by `/autoplan` Phase 4
 
@@ -702,6 +702,225 @@ Accept and integrate into plan now (13 items; updates queued for post-final-gate
 | NOT in scope additions | tool_calls pass-through (A-5) |
 | Dream state delta | ~30% of 12-month ideal |
 | Status | **DONE_WITH_CONCERNS** — 5 user challenges await final gate |
+
+---
+
+---
+
+## Eng Review (Phase 3 — /plan-eng-review via /autoplan)
+
+### Setup
+
+- **Dual voices:** `[codex-unavailable]`; Claude eng subagent ran foreground after CEO review
+- **Subagent verdict:** SHIP-WITH-FIXES (19 findings, all technical; none are user-direction challenges)
+- **Test plan artifact:** `~/.gstack/projects/llm-gateway/panda-main-test-plan-20260513-040833.md` (~63 tests for v0.1.0)
+- **Findings classification:** All 19 (F-1 through F-19) are architectural/test/security/operational — auto-decided ACCEPT per P1 (completeness) + P5 (explicit over clever). Zero user challenges.
+
+### Scope Challenge (Step 0)
+
+Read against actual plan §1–§8. The plan is greenfield, well-scoped, no existing code to compare against. The eng review's job here is to find missing surfaces, not contest scope (CEO phase already did that).
+
+**Complexity check result:** Plan covers the architectural what; subagent found 19 missing how-details. Sequencing of F-fixes:
+
+- **Pre-Task 1:** F-1/F-18 (shutdown coordination) → updates Task 1 architecture spec
+- **Pre-Task 2/3:** F-15 (GLM spike) — 2h live test before adapter implementation
+- **Task 4:** F-4 (DSN), F-9 (versioned migration + seeded re-run), F-13 (parameterized queries)
+- **Task 4.5 (new):** A-3 encryption-at-rest + F-17 cross-compile sanity
+- **Task 5:** F-2 (cache semantics), F-11 (orphaned alias), F-5 (namespace collision)
+- **Task 6:** F-3 (provider snapshot), F-7 (ctx propagation), F-19 (async log writer)
+- **Task 7:** F-16 (mcp-go budget 1d not 1h)
+- **Task 8/9:** F-10 (arg validation), F-12 (SSRF reject)
+- **Task 11:** F-6 (init idempotency), F-14 (token file)
+- **Task 12/13:** F-17 (cross-compile CI), A-11 (smoke.sh)
+
+### Eng Dual Voices — Consensus Table
+
+```
+═══════════════════════════════════════════════════════════════
+  Dimension                            Claude  Codex  Consensus
+  ──────────────────────────────────── ─────── ─────── ─────────
+  1. Architecture sound?               ISSUES    N/A   single-voice: F-1, F-2, F-3, F-18
+  2. Test coverage sufficient?         ISSUES    N/A   single-voice: F-8, F-9, F-10, F-11
+  3. Performance risks addressed?      ISSUES    N/A   single-voice: F-4, F-19
+  4. Security threats covered?         ISSUES    N/A   single-voice: F-12, F-13, F-14
+  5. Error paths handled?              ISSUES    N/A   single-voice: F-5, F-6, F-7
+  6. Deployment risk manageable?       ISSUES    N/A   single-voice: F-15, F-16, F-17
+═══════════════════════════════════════════════════════════════
+Source: subagent-only. [codex-unavailable].
+All 19 findings auto-accepted (technical, not user-direction).
+```
+
+### Section 1: Architecture Review — Augmented ASCII Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   llm-gateway (1 process)                       │
+│                                                                 │
+│         ┌──────── SIGINT/SIGTERM ────────┐                      │
+│         │                                ▼                      │
+│         │      ┌────────────────────────────────┐               │
+│         │      │  Lifecycle owner (errgroup +   │               │
+│         │      │   root context with cancel)    │ ← F-1/F-18    │
+│         │      └─────────────┬──────────────────┘               │
+│         │                    │                                  │
+│         │           ┌────────┼────────┬─────────────┐           │
+│         │           ▼        ▼        ▼             ▼           │
+│         │      ┌────────┐┌──────┐┌──────────┐┌────────────┐    │
+│ inbound─┼─────►│ HTTP   ││ MCP  ││ AsyncLog ││ SQLite     │    │
+│ (OpenAI │      │ server ││ stdio││  writer  ││ (WAL,      │    │
+│ -compat)│      │        ││server││ (F-19)   ││ busy_to=5s,│    │
+│         │      └────┬───┘└───┬──┘└─────┬────┘│ F-4)       │    │
+│         │           │        │         │     └────┬───────┘    │
+│         │           ▼        ▼         │          ▲            │
+│         │      ┌────────────────┐      │          │            │
+│         │      │ Auth (bearer)  │      │          │            │
+│         │      │ (F-14 file)    │      │          │            │
+│         │      └────┬───────────┘      │          │            │
+│         │           ▼                  │          │            │
+│         │      ┌────────────────┐      │          │            │
+│         │      │ Router         │──────┼──────────┤            │
+│         │      │ (reads store   │      │          │            │
+│         │      │  every req,    │      │          │            │
+│         │      │  snapshots     │      │          │            │
+│         │      │  provider per  │      │          │            │
+│         │      │  request ctx;  │      │          │            │
+│         │      │  F-2, F-3)     │      │          │            │
+│         │      └────┬───────────┘      │          │            │
+│         │           ▼                  │          │            │
+│         │      ┌────────────────┐      │          │            │
+│         │      │ Provider       │      │          │            │
+│         │      │ (DeepSeek/GLM, │      │          │            │
+│         │      │  SSE normalize │      │          │            │
+│         │      │  F-15;         │      │          │            │
+│         │      │  upstream HTTP │      │          │            │
+│         │      │  uses          │      │          │            │
+│         │      │  r.Context()   │      │          │            │
+│         │      │  F-7)          │      │          │            │
+│         │      └────┬───────────┘      │          │            │
+│         │           │                  │          │            │
+│         │           └──→ log event ────┘          │            │
+│         │                                         │            │
+│         │      ┌────────────────────────┐         │            │
+│         │      │  MCP tools (10)        │─────────┘            │
+│         │      │  - SSRF check (F-12)   │                      │
+│         │      │  - JSON Schema (F-10)  │                      │
+│         │      │  - dup-name err (F-5)  │                      │
+│         │      └────────────────────────┘                      │
+│         │                                                       │
+│         └───── Shutdown sequence (F-1/F-18) ───────             │
+│                1. Stop HTTP accept                              │
+│                2. Close MCP stdin reader                        │
+│                3. Wait in-flight (timeout 30s)                  │
+│                4. Drain AsyncLog channel                        │
+│                5. db.Close()                                    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Section 1 findings:**
+- F-1: Lifecycle owner with errgroup + root ctx → ACCEPT, becomes Task 1 architecture requirement.
+- F-2: Router cache invalidation semantics → ACCEPT, document "Router reads from store every request, snapshots provider data into request ctx."
+- F-3: Provider snapshot at resolve-time → ACCEPT, Task 5 spec.
+- F-18: Shutdown sequence (5 steps above) → ACCEPT, Task 1 + Task 7 + Task 11.
+
+### Section 2: Code Quality Review
+
+Examined: file structure, naming, separation. Subagent found no DRY/naming/complexity violations. (CEO phase already flagged `internal/http/` → `internal/server/`; carried forward.)
+
+**Section 2 findings:** none beyond CEO phase A-6.
+
+### Section 3: Test Review
+
+**Test diagram and full coverage matrix** moved to artifact: `~/.gstack/projects/llm-gateway/panda-main-test-plan-20260513-040833.md`.
+
+Highlights (new tests added by this review):
+- F-8: Golden-file SSE replay (byte-level wire format)
+- F-9: Seeded SQLite migration safety; PRAGMA user_version
+- F-10: MCP arg validation (unknown kind, empty name, path-traversal alias)
+- F-11: Orphaned alias → ErrNoRoute
+- F-12: SSRF reject for private/loopback/link-local base_url
+- F-15: GLM live spike (2h, pre-Task 3) + chunk normalization tests
+- F-19: Async log writer backpressure
+- F-1/F-18: Shutdown integration tests (drain + MCP close + DB close)
+
+**Test count for v0.1.0 (target):** ~63 automated + 1 manual smoke script.
+
+**Section 3 findings:** F-8, F-9, F-10, F-11 all ACCEPT. See artifact.
+
+### Section 4: Performance Review
+
+**Section 4 findings:**
+- F-4: DSN settings `_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL` + `SetMaxOpenConns` tuning → ACCEPT, Task 4 spec.
+- F-19: Async log writer to decouple HTTP latency from log insert → ACCEPT, Task 6.
+
+### Section 5: Security & Threat Model
+
+CEO phase covered this; eng adds SSRF + SQL injection defense:
+
+**Section 5 findings:**
+- F-12: SSRF allowlist for `base_url` (scheme=https + reject RFC1918/loopback/link-local + optional `allowed_hosts` env) → ACCEPT, Task 8.
+- F-13: Mandate `database/sql` `?` placeholders everywhere; static-check or convention → ACCEPT, Task 4.
+- F-14: Token file 0600 instead of env var (env var as override) → ACCEPT, Task 11.
+
+### Section 6: Error Paths
+
+**Section 6 findings:**
+- F-5: Duplicate provider name → return structured `already_exists` (don't crash) → ACCEPT, Task 8.
+- F-6: `init` idempotent (refuse to clobber without `--force`); `start` fails fast if token unset → ACCEPT, Task 11.
+- F-7: Upstream HTTP request constructed with `r.Context()` (not `context.Background()`) → ACCEPT, Tasks 2/3 spec.
+
+### Section 7: Deployment / Release
+
+**Section 7 findings:**
+- F-15: GLM live spike 2h pre-Task 3 + normalize layer in `internal/provider/common.go` → ACCEPT (schedule eater warning).
+- F-16: mcp-go integration budget 1 day (not 1h); documented fallback to `metoro-io/mcp-golang` → ACCEPT, Task 7.
+- F-17: Cross-compile CI matrix + pin `modernc.org/sqlite` to known-good version → ACCEPT, Task 12.
+
+### Section 8: Concurrency / Lifecycle
+
+**Section 8 findings:**
+- F-1/F-18: see Section 1 above.
+- F-19: Async log writer with buffered channel (size 1024), `drop-oldest` on overflow, documented at-most-once log semantics → ACCEPT, Task 6.
+
+### Auto-Decided Findings Summary (Eng)
+
+All 19 findings ACCEPT. Updated task list incorporates fixes; see test plan artifact for coverage.
+
+| # | Severity | Action | Task |
+|---|---|---|---|
+| F-1 | critical | errgroup + root ctx + signal handling | Task 1 |
+| F-2 | high | Router reads store every request | Task 5 |
+| F-3 | high | Provider snapshot in request ctx | Task 5/6 |
+| F-4 | medium | SQLite DSN: WAL + busy_timeout=5s + NORMAL | Task 4 |
+| F-5 | high | `add_provider` dup name → structured error | Task 8 |
+| F-6 | medium | `init` idempotent; `start` fails fast on missing token | Task 11 |
+| F-7 | medium | Upstream HTTP uses `r.Context()` | Task 2/3 |
+| F-8 | high | Golden-file SSE replay tests | Task 2/3 |
+| F-9 | high | Versioned schema + seeded migration test | Task 4 |
+| F-10 | medium | MCP tool arg validation tests | Task 8/9 |
+| F-11 | medium | Orphaned alias → ErrNoRoute test | Task 5 |
+| F-12 | high | SSRF allowlist (https + non-private only) | Task 8 |
+| F-13 | medium | Parameterized SQL queries everywhere | Task 4 |
+| F-14 | low | Token file 0600; env var override | Task 11 |
+| F-15 | high | 2h GLM live spike + chunk normalization | pre-Task 3 |
+| F-16 | medium | mcp-go: budget 1 day; document fallback | Task 7 |
+| F-17 | low | Cross-compile CI + pin sqlite version | Task 12 |
+| F-18 | critical | 5-step shutdown sequence | Task 1/7/11 |
+| F-19 | high | Async log writer + drop-oldest backpressure | Task 6 |
+
+### Eng Completion Summary
+
+| Element | Status |
+|---|---|
+| Dual voices | Subagent ran; Codex `[codex-unavailable]` |
+| Subagent verdict | SHIP-WITH-FIXES (19 technical findings) |
+| Architecture ASCII diagram | Produced (Section 1) |
+| Test diagram + coverage matrix | Artifact at `~/.gstack/projects/llm-gateway/panda-main-test-plan-20260513-040833.md` |
+| Test count target | ~63 automated + 1 manual smoke |
+| Critical-path gates | F-8, F-1/F-18, F-12, F-15, A-3, cross-compile smoke |
+| Findings | 19 all auto-decided ACCEPT (none are user challenges) |
+| Failure modes registry | F-1 to F-19 above, mapped to tasks |
+| Status | **DONE** — eng review clean; 0 user challenges, 19 technical fixes queued for plan edit pass |
 
 ---
 
