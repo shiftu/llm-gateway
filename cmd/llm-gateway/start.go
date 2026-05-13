@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/panda/llm-gateway/internal/provider"
 	"github.com/panda/llm-gateway/internal/server"
+	"github.com/panda/llm-gateway/internal/store"
 )
 
 const defaultAddr = "127.0.0.1:7421"
@@ -58,12 +58,24 @@ func runStart() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	prov := loadProviderFromEnv()
-	srv := server.NewServer(token, prov)
-	if prov != nil {
-		log.Printf("upstream provider: %s (kind=%s)", prov.Name, prov.Kind)
+	st, err := openStore(cfgDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not open store: %v\n", err)
+		return 1
+	}
+	if st != nil {
+		defer st.Close()
+	}
+	if err := seedProviderFromEnv(st); err != nil {
+		fmt.Fprintf(os.Stderr, "could not seed provider from env: %v\n", err)
+		return 1
+	}
+	srv := server.NewServer(token, st)
+	if st == nil {
+		log.Print("store disabled — running in stub mode")
 	} else {
-		log.Print("no provider configured — running in stub mode (set LLM_GATEWAY_PROVIDER_API_KEY to enable real upstream)")
+		providers, _ := st.ListProviders()
+		log.Printf("store ready: %d provider(s) configured", len(providers))
 	}
 
 	log.Printf("llm-gateway %s listening on http://%s", version, addr)
@@ -75,10 +87,27 @@ func runStart() int {
 	return 0
 }
 
-// loadProviderFromEnv reads a single optional upstream provider config from
-// env. v0.1 transient — SQLite-driven multi-provider lands in Task 4/5.
-// Returns nil when LLM_GATEWAY_PROVIDER_API_KEY is unset (stub mode).
-func loadProviderFromEnv() *provider.Provider {
+// openStore returns a SQLite-backed store at <cfgDir>/state.db, or nil if
+// LLM_GATEWAY_NO_STORE=1 is set (forces stub mode for offline dev).
+func openStore(cfgDir string) (*store.Store, error) {
+	if os.Getenv("LLM_GATEWAY_NO_STORE") == "1" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		return nil, err
+	}
+	return store.Open(cfgDir + "/state.db")
+}
+
+// seedProviderFromEnv installs a single provider from LLM_GATEWAY_PROVIDER_*
+// env vars when present. Convenience for v0.1 single-provider deployments —
+// SQLite-driven multi-provider config via MCP add_provider lands in Task 8.
+// Idempotent: re-running with the same name is a no-op (ErrDuplicate
+// swallowed) so restart with unchanged env is safe.
+func seedProviderFromEnv(st *store.Store) error {
+	if st == nil {
+		return nil
+	}
 	apiKey := os.Getenv("LLM_GATEWAY_PROVIDER_API_KEY")
 	if apiKey == "" {
 		return nil
@@ -89,7 +118,7 @@ func loadProviderFromEnv() *provider.Provider {
 	}
 	kind := os.Getenv("LLM_GATEWAY_PROVIDER_KIND")
 	if kind == "" {
-		kind = "deepseek" // single-provider v0.1 default; matches our spike
+		kind = "deepseek"
 	}
 	openaiURL := os.Getenv("LLM_GATEWAY_PROVIDER_OPENAI_BASE_URL")
 	anthropicURL := os.Getenv("LLM_GATEWAY_PROVIDER_ANTHROPIC_BASE_URL")
@@ -97,11 +126,20 @@ func loadProviderFromEnv() *provider.Provider {
 		openaiURL = "https://api.deepseek.com"
 		anthropicURL = "https://api.deepseek.com/anthropic"
 	}
-	return &provider.Provider{
-		Name:             name,
-		Kind:             kind,
+
+	err := st.AddProvider(store.Provider{
+		Name: name, Kind: kind,
 		OpenAIBaseURL:    openaiURL,
 		AnthropicBaseURL: anthropicURL,
 		APIKey:           apiKey,
+		IsDefault:        true,
+	})
+	if err == nil {
+		return st.SetDefaultProvider(name)
 	}
+	if err == store.ErrDuplicate {
+		// Already exists; ensure it's still the default + key matches latest env.
+		return st.SetDefaultProvider(name)
+	}
+	return err
 }

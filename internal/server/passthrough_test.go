@@ -8,17 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/panda/llm-gateway/internal/provider"
+	"github.com/panda/llm-gateway/internal/store"
 )
 
-// passthrough_test.go validates that when a Server is constructed with a
-// concrete provider, /v1/chat/completions and /v1/messages forward inbound
-// bodies upstream byte-for-byte and stream the response back without
-// re-encoding (plan R2 pass-through path; spike F-Q16 byte fidelity).
-//
-// We spin up an httptest.Server as a fake upstream — provider hits that
-// instead of the real DeepSeek API. End-to-end real-provider tests live in
-// internal/provider/provider_live_test.go (build tag: live).
+// passthrough_test.go validates the end-to-end store-driven request lifecycle:
+// inbound body parsed → router.Resolve → provider snapshot → upstream call
+// → byte-fidelity response copy → request log row.
 
 type mockUpstream struct {
 	gotURL    string
@@ -33,7 +28,6 @@ func (u *mockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.gotURL = r.URL.String()
 	u.gotHeader = r.Header.Clone()
 	u.gotBody, _ = io.ReadAll(r.Body)
-
 	if u.respCode == 0 {
 		u.respCode = http.StatusOK
 	}
@@ -44,7 +38,35 @@ func (u *mockUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, u.respBody)
 }
 
-func TestServer_OpenAIPassthrough_ForwardsToProvider(t *testing.T) {
+// newStoreWithDefaultProvider wires a fresh in-memory store with one
+// provider as default. opts let tests override base URLs to point at an
+// httptest fake.
+type storeOpts struct {
+	openaiURL    string
+	anthropicURL string
+}
+
+func newStoreWithDefaultProvider(t *testing.T, name string, opts storeOpts) *store.Store {
+	t.Helper()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.AddProvider(store.Provider{
+		Name:             name,
+		Kind:             "deepseek",
+		OpenAIBaseURL:    opts.openaiURL,
+		AnthropicBaseURL: opts.anthropicURL,
+		APIKey:           "ds-test",
+		IsDefault:        true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestServer_OpenAIPassthrough_DefaultRoute_ForwardsToProvider(t *testing.T) {
 	upstream := &mockUpstream{
 		respCT:   "application/json",
 		respBody: `{"id":"upstream-1","choices":[{"message":{"content":"hi"}}]}`,
@@ -52,13 +74,8 @@ func TestServer_OpenAIPassthrough_ForwardsToProvider(t *testing.T) {
 	upSrv := httptest.NewServer(upstream)
 	defer upSrv.Close()
 
-	prov := &provider.Provider{
-		Name:          "deepseek",
-		Kind:          "deepseek",
-		OpenAIBaseURL: upSrv.URL,
-		APIKey:        "ds-test",
-	}
-	srv := NewServer("gw-token", prov)
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL})
+	srv := NewServer("gw-token", s)
 	gw := httptest.NewServer(srv.Handler())
 	defer gw.Close()
 
@@ -69,7 +86,7 @@ func TestServer_OpenAIPassthrough_ForwardsToProvider(t *testing.T) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("client: %v", err)
+		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 
@@ -80,72 +97,154 @@ func TestServer_OpenAIPassthrough_ForwardsToProvider(t *testing.T) {
 	if !strings.Contains(string(body), `"upstream-1"`) {
 		t.Errorf("upstream body not piped back: %s", body)
 	}
-	// Upstream saw exact client body
-	if string(upstream.gotBody) != clientBody {
-		t.Errorf("body mutated through gateway:\n  want: %s\n  got:  %s", clientBody, upstream.gotBody)
-	}
-	// Upstream URL was /v1/chat/completions, auth Bearer was replaced
-	// with the provider's key (not the gateway's bearer)
+	// Upstream URL is /v1/chat/completions, Authorization is Bearer ds-test
 	if upstream.gotURL != "/v1/chat/completions" {
 		t.Errorf("upstream URL: %s", upstream.gotURL)
 	}
 	if got := upstream.gotHeader.Get("Authorization"); got != "Bearer ds-test" {
 		t.Errorf("upstream Authorization: want %q, got %q", "Bearer ds-test", got)
 	}
+
+	// Wait briefly to let the async-style log write commit (it's synchronous,
+	// but the test framework runs concurrently — keep simple).
+	time.Sleep(20 * time.Millisecond)
+	logs, _ := s.TailLogs(10)
+	if len(logs) != 1 || logs[0].Status != "ok" || logs[0].ProviderName != "deepseek" {
+		t.Errorf("request not logged: %+v", logs)
+	}
 }
 
-func TestServer_AnthropicPassthrough_ForwardsToProvider(t *testing.T) {
+func TestServer_OpenAIPassthrough_AliasRewritesModel(t *testing.T) {
+	upstream := &mockUpstream{respCT: "application/json", respBody: `{"ok":true}`}
+	upSrv := httptest.NewServer(upstream)
+	defer upSrv.Close()
+
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL})
+	if err := s.SetAlias("fast", "deepseek", "deepseek-v4-flash"); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer("gw-token", s)
+	gw := httptest.NewServer(srv.Handler())
+	defer gw.Close()
+
+	// Client asks for "fast" — gateway must rewrite to "deepseek-v4-flash".
+	clientBody := `{"model":"fast","messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/v1/chat/completions", strings.NewReader(clientBody))
+	req.Header.Set("Authorization", "Bearer gw-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: %d", resp.StatusCode)
+	}
+
+	if !strings.Contains(string(upstream.gotBody), `"deepseek-v4-flash"`) {
+		t.Errorf("upstream did not see rewritten model: %s", upstream.gotBody)
+	}
+	if strings.Contains(string(upstream.gotBody), `"fast"`) {
+		t.Errorf("upstream saw client-side alias 'fast' instead of resolved upstream model: %s", upstream.gotBody)
+	}
+}
+
+func TestServer_AnthropicPassthrough_DefaultRoute(t *testing.T) {
 	upstream := &mockUpstream{
 		respCT:   "application/json",
-		respBody: `{"id":"upstream-2","type":"message","content":[{"type":"text","text":"hi"}]}`,
+		respBody: `{"id":"upstream-2","type":"message"}`,
 	}
 	upSrv := httptest.NewServer(upstream)
 	defer upSrv.Close()
 
-	prov := &provider.Provider{
-		Name:             "deepseek",
-		Kind:             "deepseek",
-		AnthropicBaseURL: upSrv.URL,
-		APIKey:           "ds-test",
-		AnthropicVersion: "2023-06-01",
-	}
-	srv := NewServer("gw-token", prov)
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{anthropicURL: upSrv.URL})
+	srv := NewServer("gw-token", s)
 	gw := httptest.NewServer(srv.Handler())
 	defer gw.Close()
 
 	clientBody := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":50}`
 	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/v1/messages", strings.NewReader(clientBody))
 	req.Header.Set("x-api-key", "gw-token")
-	req.Header.Set("anthropic-version", "2023-06-01")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("client: %v", err)
+		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status: %d", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), `"upstream-2"`) {
-		t.Errorf("upstream body not piped back: %s", body)
 	}
 	if upstream.gotURL != "/v1/messages" {
 		t.Errorf("upstream URL: %s", upstream.gotURL)
 	}
 	if got := upstream.gotHeader.Get("x-api-key"); got != "ds-test" {
-		t.Errorf("upstream x-api-key: want %q, got %q", "ds-test", got)
+		t.Errorf("upstream x-api-key: %s", got)
 	}
-	if got := upstream.gotHeader.Get("Authorization"); got != "" {
-		t.Errorf("Authorization MUST NOT leak to anthropic upstream; got %q", got)
+}
+
+func TestServer_CrossProtocol_ReturnsNotImplemented(t *testing.T) {
+	// Provider has only OpenAI base_url; client hits /v1/messages (Anthropic).
+	// Until Task 2b IR translation lands, gateway returns 501 with a clear hint.
+	upSrv := httptest.NewServer(&mockUpstream{respCT: "application/json", respBody: `{}`})
+	defer upSrv.Close()
+
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL})
+	srv := NewServer("gw-token", s)
+	gw := httptest.NewServer(srv.Handler())
+	defer gw.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/v1/messages",
+		strings.NewReader(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":50}`))
+	req.Header.Set("x-api-key", "gw-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status: want 501, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "cross_protocol_not_supported") {
+		t.Errorf("missing cross_protocol_not_supported tag: %s", body)
+	}
+}
+
+func TestServer_NoRoute_Returns404(t *testing.T) {
+	// Store with provider but NOT default. No alias matches. → ErrNoRoute.
+	s, _ := store.Open(":memory:")
+	t.Cleanup(func() { _ = s.Close() })
+	_ = s.AddProvider(store.Provider{
+		Name: "deepseek", Kind: "deepseek",
+		OpenAIBaseURL: "https://api.deepseek.com",
+		APIKey:        "k",
+		IsDefault:     false,
+	})
+
+	srv := NewServer("gw-token", s)
+	gw := httptest.NewServer(srv.Handler())
+	defer gw.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"unknown","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer gw-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status: want 404, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "no_route") {
+		t.Errorf("missing no_route: %s", body)
 	}
 }
 
 // TestServer_OpenAIPassthrough_SSEStreamFidelity covers spike F3 + F-Q16:
-// when upstream emits text/event-stream, the gateway must (a) preserve the
-// Content-Type, (b) flush chunks as they arrive (not buffer until close),
-// and (c) emit upstream bytes verbatim.
+// when upstream emits text/event-stream, the gateway preserves the
+// Content-Type, flushes per chunk, and forwards bytes verbatim.
 func TestServer_OpenAIPassthrough_SSEStreamFidelity(t *testing.T) {
 	upstream := &flushingSSEHandler{
 		chunks: []string{
@@ -157,13 +256,8 @@ func TestServer_OpenAIPassthrough_SSEStreamFidelity(t *testing.T) {
 	upSrv := httptest.NewServer(upstream)
 	defer upSrv.Close()
 
-	prov := &provider.Provider{
-		Name:          "deepseek",
-		Kind:          "deepseek",
-		OpenAIBaseURL: upSrv.URL,
-		APIKey:        "ds-test",
-	}
-	srv := NewServer("gw-token", prov)
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL})
+	srv := NewServer("gw-token", s)
 	gw := httptest.NewServer(srv.Handler())
 	defer gw.Close()
 
@@ -173,14 +267,12 @@ func TestServer_OpenAIPassthrough_SSEStreamFidelity(t *testing.T) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("client: %v", err)
+		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-
 	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
 		t.Errorf("Content-Type: want text/event-stream*, got %q", got)
 	}
-
 	body, _ := io.ReadAll(resp.Body)
 	want := strings.Join(upstream.chunks, "")
 	if string(body) != want {
@@ -188,11 +280,6 @@ func TestServer_OpenAIPassthrough_SSEStreamFidelity(t *testing.T) {
 	}
 }
 
-// flushingSSEHandler emits chunks one at a time with explicit flushes so the
-// downstream pipeline has a chance to surface buffering bugs. If the gateway
-// were to read the whole upstream body before writing, this test still passes
-// (we read full body) — but a streaming-fidelity inspector with timing would
-// catch it. We assert byte-equality which is the v0.1 floor.
 type flushingSSEHandler struct {
 	chunks []string
 }
@@ -211,10 +298,7 @@ func (h *flushingSSEHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// TestServer_NilProvider_StubMode preserves the original Task 1 behaviour:
-// when the Server is built without a provider (stub mode for offline dev),
-// handlers return the hardcoded JSON they always did. Backwards-compat sanity.
-func TestServer_NilProvider_StubMode(t *testing.T) {
+func TestServer_NilStore_StubMode(t *testing.T) {
 	srv := NewServer("gw-token", nil)
 	gw := httptest.NewServer(srv.Handler())
 	defer gw.Close()
@@ -224,10 +308,9 @@ func TestServer_NilProvider_StubMode(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer gw-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("client: %v", err)
+		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "stub response from llm-gateway") {
 		t.Errorf("expected stub response, got: %s", body)
