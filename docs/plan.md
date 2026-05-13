@@ -1,6 +1,8 @@
 # llm-gateway — Implementation Plan
 
-> **Status: APPROVED** (autoplan D4 = option A, 2026-05-13). Approved with 42 auto-decided fixes + Task 0 Wizard-of-Oz validation. 4 user challenges (UC-1/3/4/5) explicitly declined — archived in `TODOS.md`.
+> **Status: APPROVED + REVISED-1** (autoplan D4 = option A, 2026-05-13; Plan Revision 1 added same day from Task 0 finding). Approved with 42 auto-decided fixes + Task 0 Wizard-of-Oz validation. 4 user challenges (UC-1/3/4/5) explicitly declined — archived in `TODOS.md`.
+>
+> **🆕 Plan Revision 1 (post-Task-0, 2026-05-13):** P3 expanded from OpenAI-only inbound to **dual-protocol inbound** (OpenAI Chat Completions + Anthropic Messages). See §Plan Revision 1 at the end of this file. Where the older sections below (§1 Premises, §2 Architecture, §4 Tasks) contradict the revision, the revision wins.
 >
 > Working plan file. Reviewed by `/plan-ceo-review`, `/plan-eng-review`, `/plan-devex-review` via the `/autoplan` chain. Design doc lineage: `~/.gstack/projects/llm-gateway/panda-main-design-20260513-040833.md`. Test plan artifact: `~/.gstack/projects/llm-gateway/panda-main-test-plan-20260513-040833.md`.
 >
@@ -1289,6 +1291,168 @@ Cross-phase: themes section above.
 Audit trail: this section (not empty).
 
 All checklist items: ✅. Proceed to gate.
+
+---
+
+---
+
+## Plan Revision 1 — Dual-Protocol Inbound (post-Task-0, 2026-05-13)
+
+### Origin
+
+During Task 0 Wizard-of-Oz S3, user noted: "现在大模型 api 标准有 openai 和 anthropic 两种模式." This challenges premise P3 directly.
+
+**Why it matters:** Claude Code (the agent currently being used to operate this gateway) speaks Anthropic Messages API. If the gateway only speaks OpenAI Chat Completions, Claude Code can't use it as a backend — defeating P6 (control plane ≡ data plane caller). Task 0 surfaced this exactly as designed.
+
+### P3 — Revised
+
+**OLD P3:** "OpenAI Chat Completions is inbound lingua franca."
+
+**NEW P3:** "**Both** OpenAI Chat Completions (`POST /v1/chat/completions`) **and** Anthropic Messages (`POST /v1/messages`) are inbound lingua franca. Gateway parses either into a unified internal request IR, dispatches to provider adapter, then serializes the response back to whichever shape the inbound endpoint expects."
+
+### Architecture delta
+
+Add an Intermediate Representation (IR) layer:
+
+```
+        OpenAI inbound        Anthropic inbound
+        ─────┬───────         ──────┬─────────
+             │                       │
+             ▼                       ▼
+        ┌─────────────┐         ┌─────────────┐
+        │ openai→IR   │         │ anthropic→IR│
+        │ parser      │         │ parser      │
+        └──────┬──────┘         └──────┬──────┘
+               │                       │
+               └───────────┬───────────┘
+                           ▼
+                   ┌───────────────┐
+                   │  Internal IR  │ (Request)
+                   │  - messages   │
+                   │  - system     │
+                   │  - tools      │
+                   │  - stream     │
+                   └───────┬───────┘
+                           ▼
+                   ┌───────────────┐
+                   │  Router       │ (unchanged)
+                   └───────┬───────┘
+                           ▼
+                   ┌───────────────┐
+                   │  Provider     │ (IR → upstream native)
+                   │  GLM/DeepSeek │
+                   └───────┬───────┘
+                           ▼
+                   ┌───────────────┐
+                   │  Internal IR  │ (Response, including SSE chunks)
+                   └───────┬───────┘
+                           ▼
+                  ┌────────┴─────────┐
+                  ▼                  ▼
+           ┌───────────┐       ┌─────────────┐
+           │ IR→openai │       │ IR→anthropic│
+           │ serializer│       │ serializer  │
+           └─────┬─────┘       └──────┬──────┘
+                 ▼                    ▼
+            OpenAI SSE           Anthropic SSE
+            (delta chunks)       (event types:
+                                  message_start,
+                                  content_block_*,
+                                  message_delta,
+                                  message_stop)
+```
+
+### File structure delta
+
+Adds 1 package + 1 handler:
+
+```
+internal/
+  ir/                                  ← NEW: unified request/response types
+    request.go                         (Request, Message, Tool, etc.)
+    response.go                        (Response, ContentBlock, StopReason)
+    stream.go                          (StreamChunk — superset of both formats)
+  server/
+    chat_completions.go                ← UPDATED: openai→IR, IR→openai SSE
+    messages.go                        ← NEW: anthropic→IR, IR→anthropic SSE
+  provider/
+    provider.go                        ← UPDATED: interface now takes ir.Request,
+                                                 returns ir.Response / ir.StreamChan
+    glm.go                             ← UPDATED: IR→GLM native + GLM→IR
+    deepseek.go                        ← UPDATED: IR→DeepSeek native + DeepSeek→IR
+```
+
+### Task list delta (insert / modify)
+
+**New Task 1.5 — Define IR types** (~0.5 day, inserts between original Task 1 and Task 2)
+- `internal/ir/request.go`: `Request{Messages []Message; System string; Tools []Tool; Stream bool; Model string; ...}`
+- `internal/ir/response.go`: `Response{Content []ContentBlock; StopReason string; Usage Usage}`
+- `internal/ir/stream.go`: `StreamChunk{Type string; Delta string; ContentBlockIndex int; Usage *Usage}`
+- IR shape is closer to Anthropic Messages than OpenAI (system as top-level field, multi-block content) — explicit choice: Anthropic is the more expressive superset, OpenAI is mostly mappable down.
+- Tests: round-trip empty / single-message / system-prompt / multi-block / tool-use requests through IR.
+
+**Task 2 modified** (DeepSeek adapter): now `func (p *DeepSeek) Complete(ctx, ir.Request) (ir.Response, error)` and `Stream(ctx, ir.Request) (<-chan ir.StreamChunk, error)`. Tests assert ir-shape round-trip.
+
+**Task 3 modified** (GLM adapter): same shape; F-15 spike now also verifies GLM SSE → IR.StreamChunk conversion preserves semantics.
+
+**New Task 6.5 — `/v1/messages` handler** (~1 day, inserts between original Task 6 and Task 7)
+- `internal/server/messages.go`
+- Parse Anthropic Messages POST body → ir.Request
+- Route → provider → ir.Response / ir.StreamChan
+- Serialize → Anthropic SSE event stream (`event: message_start\ndata: ...\n\n`, `content_block_delta`, `message_stop`)
+- Tests:
+  - Blocking happy path
+  - Streaming happy path — golden-file replay of an Anthropic Messages SSE stream
+  - System-prompt-as-top-level handled
+  - Multi-block content response
+  - `r.Context().Done()` propagates (per F-7)
+  - Upstream error → Anthropic-shaped error JSON `{type:"error", error:{type:"...", message:"..."}}`
+
+**Task 6 modified** (`/v1/chat/completions` e2e): adds OpenAI→IR→OpenAI round-trip; same golden-file approach for OpenAI SSE deltas.
+
+**No change** to: Tasks 0, 1, 4, 4.5, 5, 7, 7.5, 8, 9, 10, 11, 12, 13. MCP layer and SQLite layer untouched — they're inbound-protocol-agnostic.
+
+### Effort delta
+
+| Item | Before | After |
+|---|---|---|
+| Task 0 (Wizard-of-Oz) | 30 min | 30 min (in progress, partial result is THIS revision) |
+| Task 1.5 (IR types) | — | +0.5 day |
+| Task 2/3 (providers) | 1d + 0.5d | 1d + 0.5d (no change, but adapter code changes shape) |
+| Task 6 (OpenAI e2e) | 1d | 1d |
+| Task 6.5 (Anthropic e2e) | — | +1 day |
+| **v0.1.0 total** | ~9.5 工程日 | **~11 工程日** |
+
++1.5 days for inbound dual-protocol. Cost is concentrated in Task 1.5 (IR types) and Task 6.5 (Anthropic handler).
+
+### Open Questions added
+
+- **Q9:** Streaming chunk fidelity — Anthropic Messages SSE has explicit event types (`message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`, `ping`) vs OpenAI's flat delta chunks. IR.StreamChunk must hold enough info to serialize either. Settled: Anthropic-shaped is the superset; OpenAI is a lossy down-conversion (no `content_block_start` events emitted, just `delta` chunks until done).
+- **Q10:** Tool use schema — both support tools but with different JSON shape (`tools/tool_use/tool_result` Anthropic vs `tools/tool_calls/tool` OpenAI). v0.1 ships pass-through only; lossless round-trip across formats is v0.2 if needed (likely never, since each caller stays in its own ecosystem).
+- **Q11:** Anthropic `system` parameter is top-level string; OpenAI `system` is a role in the messages array. IR has system as a top-level optional field; openai-parser hoists any leading `{role:"system", content:...}` into IR.System.
+- **Q12:** Anthropic supports image blocks and PDF blocks in content. v0.1 chat-only; reject (400) non-text content blocks on inbound until a provider supports them.
+
+### Failure mode added
+
+- **FM-2-1:** Inbound is OpenAI, upstream is GLM, but client sent a tool_calls response back as input message. OpenAI→IR parses; IR→GLM native must include the tool_calls. If GLM doesn't support that tool_calls shape, return structured error per F-DX-05.
+
+### Decision Audit Trail addendum
+
+| # | Decision | Classification | Principle | Origin |
+|---|---|---|---|---|
+| R1-1 | Expand P3 to dual-protocol inbound | strategic | P1 + P6 alignment | Task 0 S3 finding |
+| R1-2 | Internal IR shape closer to Anthropic | mechanical | P5 (superset is simpler than union) | derived from R1-1 |
+| R1-3 | v0.1 rejects non-text content blocks (Q12) | mechanical | P3 pragmatic (scope guard) | derived from R1-1 |
+| R1-4 | v0.1 chat-only; no image/PDF/audio | mechanical | scope unchanged | reaffirmed |
+
+### What Task 0 has already proven
+
+Task 0 was budgeted 30 min to validate P6. Before reaching S4, it already:
+- Surfaced a P3 protocol gap (this revision)
+- Confirmed that MCP-driven config edits feel natural and bundle well (S1+S2: 2 ops in one breath, 3-tool-call sequence in S2's add-deepseek-and-aliases)
+- Shown the agent sensibly stalls when prerequisite missing (S2 caught missing deepseek before calling set_model_alias)
+
+If Task 0 finishes without surfacing more P-revisions, MCP-WINS verdict is leaning in.
 
 ---
 
