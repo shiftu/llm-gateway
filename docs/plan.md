@@ -1,8 +1,12 @@
 # llm-gateway — Implementation Plan
 
-> **Status: APPROVED + REVISED-1** (autoplan D4 = option A, 2026-05-13; Plan Revision 1 added same day from Task 0 finding). Approved with 42 auto-decided fixes + Task 0 Wizard-of-Oz validation. 4 user challenges (UC-1/3/4/5) explicitly declined — archived in `TODOS.md`.
+> **Status: APPROVED + REVISED-2** (autoplan D4 = option A, 2026-05-13; Revision 1 + Revision 2 added same day). Approved with 42 auto-decided fixes + Task 0 Wizard-of-Oz validation. 4 user challenges (UC-1/3/4/5) explicitly declined — archived in `TODOS.md`.
 >
-> **🆕 Plan Revision 1 (post-Task-0, 2026-05-13):** P3 expanded from OpenAI-only inbound to **dual-protocol inbound** (OpenAI Chat Completions + Anthropic Messages). See §Plan Revision 1 at the end of this file. Where the older sections below (§1 Premises, §2 Architecture, §4 Tasks) contradict the revision, the revision wins.
+> **🆕 Plan Revision 1 (post-Task-0):** P3 expanded from OpenAI-only inbound to **dual-protocol inbound** (OpenAI Chat Completions + Anthropic Messages). Triggered by user noting Claude Code uses Anthropic API natively.
+>
+> **🆕 Plan Revision 2 (post-DeepSeek-spike):** Architecture pivots from "always IR-translate" to **pass-through preferred, IR-translate as fallback**. Provider config gets dual `base_url`s. IR types expand to include reasoning/thinking content blocks + reasoning_tokens. Triggered by DeepSeek v4 spike — see `docs/spikes/2026-05-13-deepseek-protocols.md`.
+>
+> **Precedence:** When older sections below (§1 Premises, §2 Architecture, §4 Tasks) contradict revisions, the most recent revision wins (R2 > R1 > original).
 >
 > Working plan file. Reviewed by `/plan-ceo-review`, `/plan-eng-review`, `/plan-devex-review` via the `/autoplan` chain. Design doc lineage: `~/.gstack/projects/llm-gateway/panda-main-design-20260513-040833.md`. Test plan artifact: `~/.gstack/projects/llm-gateway/panda-main-test-plan-20260513-040833.md`.
 >
@@ -1453,6 +1457,201 @@ Task 0 was budgeted 30 min to validate P6. Before reaching S4, it already:
 - Shown the agent sensibly stalls when prerequisite missing (S2 caught missing deepseek before calling set_model_alias)
 
 If Task 0 finishes without surfacing more P-revisions, MCP-WINS verdict is leaning in.
+
+---
+
+---
+
+## Plan Revision 2 — Pass-Through Routing + Reasoning Content (post-DeepSeek-spike, 2026-05-13)
+
+### Origin
+
+DeepSeek v4-flash live spike against `api.deepseek.com` revealed:
+
+1. DeepSeek natively serves BOTH `/v1/chat/completions` (OpenAI) AND `/anthropic/v1/messages` (Anthropic). Same key.
+2. v4-flash is a **reasoning model** — every response carries hidden chain-of-thought as `reasoning_content` (OpenAI shape) or `type:thinking` content block (Anthropic shape).
+3. Anthropic-endpoint latency is 2.24× the OpenAI endpoint for identical work (1.74s vs 3.90s). DeepSeek's own translation layer is the cost.
+
+Full smoke results: `docs/spikes/2026-05-13-deepseek-protocols.md`.
+
+### Architecture pivot
+
+R1 assumed gateway always parses inbound → IR → upstream native. R2 splits routing:
+
+```
+inbound openai      + provider has openai_base_url     → PASS-THROUGH (preferred)
+inbound openai      + provider has only anthropic_url  → IR-translate to anthropic
+inbound anthropic   + provider has anthropic_base_url  → PASS-THROUGH (preferred)
+inbound anthropic   + provider has only openai_url     → IR-translate to openai
+```
+
+Pass-through means: gateway reads the inbound request body, swaps in the provider's URL + key + headers, streams the upstream response back through (with bytes transformed only for SSE framing if needed). No IR involvement. Single TCP hop, lowest latency.
+
+IR-translate is the fallback — only fires when inbound protocol and outbound protocol differ. v0.1 estimate: ~20% of calls hit IR.
+
+### Storage schema delta — provider table
+
+```sql
+-- R2: was `base_url TEXT`; now dual url + version
+CREATE TABLE providers (
+  name              TEXT PRIMARY KEY,
+  kind              TEXT NOT NULL,                  -- "deepseek" | "glm" | "openai" | "anthropic"
+  openai_base_url   TEXT,                           -- nullable
+  anthropic_base_url TEXT,                          -- nullable
+  api_key           TEXT NOT NULL,                  -- encrypted (per A-3)
+  anthropic_version TEXT DEFAULT '2023-06-01',
+  is_default        INTEGER NOT NULL DEFAULT 0,
+  created_at        INTEGER NOT NULL,
+  CHECK (openai_base_url IS NOT NULL OR anthropic_base_url IS NOT NULL)
+);
+```
+
+MCP `add_provider` tool args change accordingly: `name`, `kind`, `openai_base_url?`, `anthropic_base_url?` (at least one required), `api_key`, `anthropic_version?`.
+
+### IR types — final shape
+
+```go
+package ir
+
+type Request struct {
+    Model      string
+    Messages   []Message
+    System     string          // top-level, hoisted from openai role=system
+    Tools      []Tool
+    Stream     bool
+    MaxTokens  int
+    Temperature *float32
+    Metadata   map[string]any  // pass-through for vendor extensions
+}
+
+type Message struct {
+    Role    string           // "user" | "assistant" | "tool"
+    Content []ContentBlock   // multi-block to match Anthropic
+}
+
+type ContentBlock struct {
+    Type      string  // "text" | "thinking" | "tool_use" | "tool_result"
+    Text      string  // for text
+    Thinking  string  // for thinking
+    Signature string  // for thinking (Anthropic adds this)
+    ToolUse   *ToolUse
+    ToolResult *ToolResult
+}
+
+type Response struct {
+    Content    []ContentBlock
+    StopReason string   // "end_turn" | "max_tokens" | "stop_sequence" | "tool_use"
+    Usage      Usage
+    Model      string
+    ID         string
+}
+
+type Usage struct {
+    InputTokens         int
+    OutputTokens        int
+    ReasoningTokens     int  // 0 if not a reasoning model
+    CacheReadTokens     int
+    CacheCreationTokens int
+}
+
+type StreamChunk struct {
+    Type        string // "message_start" | "content_block_start" | "content_block_delta" |
+                      // "content_block_stop" | "message_delta" | "message_stop" | "ping"
+    BlockIndex  int
+    BlockType   string  // "text" | "thinking" | "tool_use"
+    DeltaText   string  // for text_delta / thinking_delta
+    Usage       *Usage
+    StopReason  string
+    Model       string  // present on message_start
+    ID          string  // present on message_start
+}
+```
+
+The IR shape mirrors Anthropic Messages because Anthropic is the more expressive superset. OpenAI is a lossy down-projection (no explicit block boundaries, reasoning_content flat-collapsed).
+
+### Provider adapter shape — final
+
+Each provider implements 4 methods:
+
+```go
+type Provider interface {
+    Name() string
+
+    // Native pass-through paths — gateway calls these when inbound protocol
+    // matches provider's available base_url. Body is forwarded with minimal
+    // transformation (just URL/header swap).
+    OpenAIPassthrough(ctx, body io.Reader, stream bool) (resp io.ReadCloser, err error)
+    AnthropicPassthrough(ctx, body io.Reader, stream bool) (resp io.ReadCloser, err error)
+
+    // IR paths — gateway calls these when protocols cross. Provider translates
+    // IR → native upstream shape, then native response → IR.
+    CompleteIR(ctx, req ir.Request) (ir.Response, error)
+    StreamIR(ctx, req ir.Request) (<-chan ir.StreamChunk, error)
+}
+```
+
+Pass-through methods are short — URL + header substitution + body forwarding. IR methods are the heavier path (full serde + reasoning_content ↔ thinking block mapping + usage field translation per F6 in spike).
+
+### Task list delta (over R1)
+
+- **Task 1.5 (IR types)** — expand from 0.5d to 1d. Now must include `ContentBlock` with `Thinking` variant + `Signature`, `Usage` with 5 fields, `StreamChunk` with event types.
+- **Task 2 (DeepSeek adapter)** — split into 2a (OpenAIPassthrough + AnthropicPassthrough — both trivial since DeepSeek serves both natively) and 2b (CompleteIR + StreamIR — only fires on protocol crossing). Effort: 1d unchanged.
+- **Task 3 (GLM adapter)** — same split. Hinges on Q13: if GLM only has OpenAI-compat, then AnthropicPassthrough returns ErrNotSupported and IR path carries Anthropic-inbound traffic. 0.5d unchanged.
+- **Task 4 storage schema** — adjust providers table per R2 schema above. +0.25d for migration logic (R1's Task 4 already has F-9 versioned schema; just bump version).
+- **Task 5 router** — adds protocol-aware decision. Given inbound protocol + provider's available base_urls, returns either (pass-through path + provider) or (IR path + provider). +0.25d.
+- **Task 6 (`/v1/chat/completions` handler)** — wires pass-through fast path + IR fallback. ~unchanged.
+- **Task 6.5 (`/v1/messages` handler)** — same wiring symmetrically. ~unchanged.
+- **Task 8 MCP add_provider tool** — args expanded to dual base_urls. ~unchanged.
+
+### Effort delta (over R1)
+
+| Item | R1 estimate | R2 estimate |
+|---|---|---|
+| Task 1.5 (IR types) | 0.5d | 1d |
+| Task 4 (storage + migration) | 1d | 1.25d |
+| Task 5 (router) | 1d | 1.25d |
+| **v0.1.0 total** | ~11d | **~11.5d** |
+
+Net +0.5d on top of R1's +1.5d over baseline. Total project ~11.5 工程日 from original 8.
+
+### Open Questions added
+
+- **Q13:** Does GLM/Zhipu have a native Anthropic endpoint? Spike against `https://open.bigmodel.cn/anthropic` or check Zhipu docs. If yes → no IR translation needed for v0.1 provider set; IR layer becomes dormant insurance. If no → Anthropic-inbound + GLM-upstream is the only IR-hot path.
+- **Q14:** Reasoning-content passthrough policy when inbound is OpenAI (no canonical `reasoning_content` field in OpenAI spec, but it's a widely-adopted vendor extension). Lean: pass it through (matches o1 + DeepSeek's own OpenAI endpoint behavior).
+- **Q15:** Anthropic `signature` field on thinking blocks — verify across multiple requests if it's actually a verification signature or just request id duplication.
+- **Q16:** Pass-through SSE byte-level fidelity. Pass-through MUST emit the upstream bytes verbatim including the `\n\n` SSE delimiters. Test with golden file: client byte-stream from DeepSeek direct === client byte-stream from gateway pass-through.
+
+### Failure modes added
+
+- **FM-R2-1:** Provider configured with only one base_url, client sends request via the other protocol. → IR translation path. Test: configure GLM with only openai_base_url; send Anthropic-format request; gateway translates inbound → IR → openai upstream → IR → anthropic response. Latency penalty expected.
+- **FM-R2-2:** Reasoning-content data loss. If gateway translates DeepSeek-OpenAI `reasoning_content` to OpenAI inbound and the client doesn't understand the field, content is wasted. Mitigation: pass through unchanged (matches OpenAI o1 convention).
+- **FM-R2-3:** Anthropic stream `ping` event has no OpenAI equivalent. Drop on IR translate to OpenAI (covered in F7 spike conclusion).
+
+### Decision Audit Trail addendum
+
+| # | Decision | Classification | Principle | Origin |
+|---|---|---|---|---|
+| R2-1 | Provider table dual base_urls | mechanical | P5 (explicit) | spike F2 |
+| R2-2 | Pass-through preferred over IR | strategic | P3 pragmatic + perf | spike F5 (2.24× latency) |
+| R2-3 | IR.ContentBlock includes `thinking` variant | mechanical | P1 completeness | spike F1 |
+| R2-4 | IR.Usage takes 5-field superset | mechanical | P1 | spike F6 |
+| R2-5 | StreamChunk event types (Anthropic-shape superset) | mechanical | P5 | spike F3 |
+| R2-6 | Provider adapter: 4 methods (2 passthrough + 2 IR) | mechanical | P3 (cheaper happy path) | derived from R2-2 |
+| R2-7 | reasoning_content pass-through to OpenAI inbound | strategic | P3 + match-incumbent | Q14 default answer |
+
+### What Task 0 + spike have already produced
+
+- **R1:** Caught protocol-coverage gap (P3) before any Go was written
+- **R2:** Caught reasoning-content shape + pass-through performance opportunity before any Go was written
+- **Total saved:** ~3 days of likely rework had these surfaced after Task 1-6 were already coded
+
+Task 0 + the 30-min spike together cost ~45 min of decision time. ROI is unambiguous.
+
+### Next concrete step
+
+1. **Verify Q13** — send a 5-second curl spike against GLM's openai endpoint + try GLM Anthropic endpoint if user has GLM key. If GLM is OpenAI-only, IR layer carries the Anthropic-inbound + GLM-upstream traffic (real, not theoretical).
+2. **Then:** F-16 mcp-go selection spike (1d) — but can run in parallel with Task 1.5 since they don't share files.
+3. **Then:** Task 1 (HTTP skeleton + bearer auth) per the original task ordering.
 
 ---
 
