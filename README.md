@@ -116,6 +116,88 @@ Teams get independent usage counters and quota controls, managed through MCP too
 The legacy `LLM_GATEWAY_TOKEN` env var is permanent — it always works as a bootstrap
 and lost-key recovery mechanism regardless of what is stored in the config file.
 
+## Error reference
+
+Every error response has the same JSON shape:
+
+```json
+{
+  "error": {
+    "type":    "<error_type>",
+    "message": "<human-readable description>",
+    "fix":     "<actionable hint>"
+  }
+}
+```
+
+| HTTP | `type` | Cause | Fix |
+|------|--------|-------|-----|
+| 400 | `body_read_error` | Could not read request body | Resend; check client body handling |
+| 400 | `invalid_json` | Body is not valid JSON | Send a JSON body matching OpenAI or Anthropic shape |
+| 400 | `missing_model` | `model` field absent or empty | Set `model` to a registered alias or upstream model name |
+| 401 | `missing_credentials` | No `Authorization` or `x-api-key` header | Send the gateway token as `Authorization: Bearer <token>` or `x-api-key: <token>` |
+| 401 | `invalid_credentials` | Token wrong, key revoked, or key not found | Verify token matches `LLM_GATEWAY_TOKEN`; revoked/expired keys must be reissued |
+| 401 | `internal_error` | Auth DB lookup failed | Retry; check gateway logs if it persists |
+| 404 | `no_route` | No alias matches and no default provider set | Register an alias via `set_model_alias` or set a default via `set_default_provider` |
+| 429 | `quota_exceeded` | Per-minute / per-day / per-month limit hit | Check quota config or contact the gateway admin |
+| 501 | `cross_protocol_not_supported` | Provider has no base URL for the inbound protocol | Register the provider with an `openai_base_url` or `anthropic_base_url` that matches the inbound protocol |
+| 502 | `upstream_error` | Could not reach the upstream provider | Check provider `base_url` and network; tail `request_logs` for details |
+
+## SDK configuration
+
+Point any OpenAI-compatible or Anthropic-compatible SDK at the gateway:
+
+```python
+# OpenAI SDK
+from openai import OpenAI
+client = OpenAI(base_url="https://<host>/v1", api_key="lgw_<key>")
+
+# Anthropic SDK
+import anthropic
+client = anthropic.Anthropic(base_url="https://<host>", api_key="lgw_<key>")
+```
+
+**Claude Code** — set in `~/.claude.json`:
+```json
+{ "apiBaseUrl": "https://<host>" }
+```
+
+## API key security
+
+`issue_api_key` prints the plaintext token **once** at issuance — it is not stored and cannot be retrieved. If a key is lost, revoke it with `revoke_api_key` and issue a new one.
+
+The legacy `LLM_GATEWAY_TOKEN` is a permanent bootstrap and lost-key recovery path; it always works regardless of the api_keys table state.
+
+## MCP tools
+
+The gateway exposes a stdio MCP server (`llm-gateway mcp-serve`). All tools require an `mcp_admin` key or the legacy token, except `ping` (no auth) and `add_team` (`mcp_super`).
+
+**Provider & routing**
+
+| Tool | Description |
+|------|-------------|
+| `add_provider` | Register an upstream provider |
+| `remove_provider` | Delete a provider (cascades to its aliases) |
+| `list_providers` | List providers (API key redacted to last 4 chars) |
+| `set_default_provider` | Set the global fallback provider |
+| `set_model_alias` | Map a model name to a provider + upstream model |
+| `delete_model_alias` | Remove a global alias |
+| `list_model_aliases` | List all global aliases |
+
+**Multi-tenant**
+
+| Tool | Description | Min scope |
+|------|-------------|-----------|
+| `add_team` | Create a team | `mcp_super` |
+| `list_teams` | List all teams | `mcp_admin` |
+| `issue_api_key` | Issue an `lgw_` inbound key for a team | `mcp_admin` |
+| `revoke_api_key` | Revoke a key | `mcp_admin` |
+| `list_api_keys` | List a team's keys | `mcp_admin` |
+| `set_quota` | Set request / token / cost limits (minute / day / month) | `mcp_admin` |
+| `get_quota` | Read a quota entry | `mcp_admin` |
+| `list_quotas` | List all quota rules | `mcp_admin` |
+| `list_request_logs` | Query request logs (filterable by team or key) | `mcp_admin` |
+
 ## Environment variables
 
 | Variable | Default | Description |
