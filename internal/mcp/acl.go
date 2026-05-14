@@ -32,6 +32,8 @@ var registry = map[string]string{
 	"set_model_alias":      "mcp_admin",
 	"delete_model_alias":   "mcp_admin",
 	"list_model_aliases":   "mcp_admin",
+	"set_model_cost":       "mcp_admin",
+	"list_model_costs":     "mcp_admin",
 
 	// T9: tenancy tools
 	"add_team":        "mcp_super",

@@ -64,6 +64,21 @@ func NewServer(token string, s *store.Store) *Server {
 	return srv
 }
 
+// MountMCP wires the Streamable HTTP MCP transport onto /mcp on the shared
+// mux. The handler is expected to be BuildMCPHandler's output: legacyKeyShim
+// wrapping mcp-go's StreamableHTTPServer, WITHOUT its own auth middleware.
+// /mcp travels through Server.Handler()'s outer auth.Middleware exactly like
+// /v1/* and is skipped by quota.Middleware via path check (see quota.go).
+//
+// Skips registration if h is nil so the gateway boots cleanly when MCP is
+// disabled.
+func (s *Server) MountMCP(h http.Handler) {
+	if h == nil {
+		return
+	}
+	s.mux.Handle("/mcp", h)
+}
+
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
 	if s.quota != nil {

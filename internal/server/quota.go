@@ -41,6 +41,13 @@ func NewQuotaMW(st *store.Store) *QuotaMW {
 // Middleware returns an http.Handler that enforces quotas before calling next.
 func (q *QuotaMW) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /mcp is admin/control plane (JSON-RPC), not inbound LLM traffic;
+		// counting it against an lgw_ key's RPM/day budget would conflate
+		// usage with administration. Skip quota entirely on this path.
+		if r.URL.Path == "/mcp" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		ak, ok := authpkg.APIKeyFromContext(r.Context())
 		if !ok || ak.ID == "__legacy__" {
 			next.ServeHTTP(w, r)

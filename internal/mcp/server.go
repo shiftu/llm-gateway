@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -73,6 +74,23 @@ func MakeContextFunc(legacyToken string, st *store.Store, cache *authpkg.KeyCach
 		}
 		cache.Put(ak)
 		return authpkg.NewContext(ctx, ak)
+	}
+}
+
+// MakeHTTPContextFunc returns an mcp-go HTTPContextFunc for the Streamable
+// HTTP transport. Auth for the HTTP path is handled by the upstream
+// internal/server middleware chain (Auth.Middleware → legacyKeyShim), which
+// has already injected an authpkg.APIKey into r.Context() before mcp-go
+// invokes its handler. This function is therefore a thin pass-through whose
+// only job is to forward ctx unchanged so the per-request APIKey reaches
+// tool handlers via APIKeyFromContext.
+//
+// Kept as a separate function (not inlined) so tests and future hooks have
+// a stable injection point — e.g. attaching a tracing span or per-request
+// logger derived from r.Header.
+func MakeHTTPContextFunc() mcpserver.HTTPContextFunc {
+	return func(ctx context.Context, _ *http.Request) context.Context {
+		return ctx
 	}
 }
 

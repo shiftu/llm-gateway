@@ -58,6 +58,7 @@ func runStart() int {
 		return 1
 	}
 	srv := server.NewServer(token, st)
+	srv.MountMCP(server.BuildMCPHandler(st))
 
 	printBanner(token, source, cfgDir, addr, st)
 
@@ -100,7 +101,8 @@ func printBanner(token, source, cfgDir, addr string, st *store.Store) {
 	}
 	fmt.Println(" OpenAI:    Authorization: Bearer", tok8)
 	fmt.Println(" Anthropic: x-api-key:", tok8)
-	fmt.Println(" MCP:       llm-gateway mcp-config --client=1")
+	fmt.Printf(" MCP HTTP:  http://%s/mcp  (Bearer %s)\n", addr, tok8)
+	fmt.Println(" MCP cfg:   llm-gateway mcp-config --client=1")
 	fmt.Println(sep)
 
 	if source == tokenSourceEphemeral {
