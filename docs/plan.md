@@ -1655,4 +1655,894 @@ Task 0 + the 30-min spike together cost ~45 min of decision time. ROI is unambig
 
 ---
 
-<!-- /autoplan restore point: ~/.gstack/projects/llm-gateway/panda-main-autoplan-restore-*.md (none yet; first /autoplan pass in progress) -->
+## 🆕 Plan Revision 3 — v0.1.5 Multi-tenancy Additive Layer (2026-05-13)
+
+**Triggered by:** User direction "架构需要考虑给多个team,一个team多个用户create APIKey,并统计usage. mcp server token 区分super admin和normal admin." Premise gate at /autoplan run #2 selected option C (additive v0.1.5 layer) with all four scope items enabled (core 4-piece set + double-tier MCP RBAC + quota enforcement + per-team provider with optional fallback).
+
+**Precedence:** R3 > R2 > R1 > original. Where R3 contradicts P1 ("Single-user / small-team scope. Not SaaS. No RBAC, no multi-tenancy, no billing.") in §1, R3 wins for v0.1.5+. P2 (no web UI), P3 (dual-protocol inbound, see R1), P4 (GLM+DeepSeek), P5 (single binary, SQLite, no Postgres/Redis), P6 (AI-native) all UNCHANGED.
+
+### Premise delta
+
+| | v0.1 (current) | v0.1.5 (R3) |
+|---|---|---|
+| **P1 — Tenancy** | Single bearer token, no RBAC | Multi-tenant **opt-in**, additive; legacy token still works |
+| **P2 — Ops surface** | MCP only (no web UI) | MCP only (no web UI) |
+| **P5 — Artifact** | Single Go binary, SQLite, no external state | Single Go binary, SQLite (additive schema v2), no external state |
+| Inbound auth | Single `LLM_GATEWAY_TOKEN` | API key lookup in `api_keys` table; legacy token maps to `super_admin @ team:default` |
+| Storage | providers, model_aliases, request_logs | + teams, users, api_keys, usage_counters, quotas; ALTER on providers (team_id NULL) + request_logs (api_key_id, team_id NULL) |
+| MCP RBAC | n/a (single token = full power) | Two tiers: `super_admin` (cross-team) / `normal_admin` (own team) |
+| Provider scoping | Global only | Optional `team_id`; NULL = global default fallback |
+| Quotas | None | Optional per-team or per-key; enforced inbound (429 on exceed) |
+
+### Backward compatibility contract (CRITICAL — drives every R3 design choice)
+
+1. **Existing `LLM_GATEWAY_TOKEN` env var keeps working forever.** When the inbound auth middleware sees a token that equals the env value, it short-circuits to `(team:default, user:root, role:super_admin)` without consulting `api_keys`. No forced migration.
+2. **Pre-1.5 single-provider config keeps working.** `providers.team_id` is nullable; NULL means "global default, served to any team that has no team-specific provider matching the request."
+3. **Pre-1.5 `request_logs` rows are readable forever.** Added columns are nullable; old `tail_logs` MCP tool surfaces them with empty team/key attribution.
+4. **Multi-tenancy is opt-in via MCP.** `add_team` is the explicit gesture that lights up the new world. A user who never runs it sees no behavioral change.
+5. **v0.1 ship is unblocked.** R3 introduces **zero** changes to in-progress Tasks 7-13. The schema hooks (request_logs.api_key_id, request_logs.team_id) are added via migration v1→v2, which only fires when the operator upgrades.
+
+### Schema additions (migration v1 → v2)
+
+```sql
+-- New tables
+CREATE TABLE teams (
+  id          TEXT PRIMARY KEY,        -- nanoid: tm_<rand>
+  slug        TEXT NOT NULL UNIQUE,    -- short handle: "acme", "platform"
+  name        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE users (
+  id           TEXT PRIMARY KEY,       -- usr_<rand>
+  team_id      TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  email        TEXT NOT NULL,          -- identity label, not an auth factor in v0.1.5
+  display_name TEXT,
+  created_at   INTEGER NOT NULL,
+  UNIQUE (team_id, email)
+);
+
+CREATE TABLE api_keys (
+  id            TEXT PRIMARY KEY,      -- ak_<rand>; also the displayable identifier
+  user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hash          TEXT NOT NULL,         -- bcrypt of the full secret; plaintext shown ONCE at issuance
+  prefix        TEXT NOT NULL,         -- first 12 chars for UI display + prefix-indexed lookup hint
+  name          TEXT,                  -- human label ("CI key", "Cline laptop")
+  scope         TEXT NOT NULL,         -- "inbound" | "mcp_super" | "mcp_normal"
+  revoked_at    INTEGER,               -- NULL = active
+  expires_at    INTEGER,               -- NULL = never
+  last_used_at  INTEGER,
+  created_at    INTEGER NOT NULL,
+  CHECK (scope IN ('inbound','mcp_super','mcp_normal'))
+);
+CREATE INDEX idx_api_keys_user   ON api_keys(user_id);
+CREATE INDEX idx_api_keys_prefix ON api_keys(prefix);
+
+CREATE TABLE usage_counters (
+  -- per (api_key, calendar-day) rolling aggregate; UPSERT on each request
+  api_key_id       TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  day              INTEGER NOT NULL,    -- unix-millis / 86_400_000, server-local-TZ for v0.1.5
+  request_count    INTEGER NOT NULL DEFAULT 0,
+  input_tokens     INTEGER NOT NULL DEFAULT 0,
+  output_tokens    INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (api_key_id, day)
+);
+
+CREATE TABLE quotas (
+  -- optional per-team or per-key cap; absence = unlimited
+  scope_kind   TEXT NOT NULL,           -- "team" | "key"
+  scope_id     TEXT NOT NULL,
+  window       TEXT NOT NULL,           -- "month" | "day" | "minute"
+  max_requests INTEGER,                 -- NULL = no request cap
+  max_tokens   INTEGER,                 -- NULL = no token cap (sum of input+output)
+  PRIMARY KEY (scope_kind, scope_id, window),
+  CHECK (scope_kind IN ('team','key')),
+  CHECK (window IN ('month','day','minute'))
+);
+
+-- Additive ALTERs to existing tables (preserve all v0.1 data + behavior)
+ALTER TABLE providers     ADD COLUMN team_id    TEXT REFERENCES teams(id) ON DELETE CASCADE;
+ALTER TABLE request_logs  ADD COLUMN api_key_id TEXT REFERENCES api_keys(id) ON DELETE SET NULL;
+ALTER TABLE request_logs  ADD COLUMN team_id    TEXT;  -- denormalized for fast filter; no FK to keep ALTER cheap
+
+-- model_aliases gets scoped too: NULL team_id = global alias
+ALTER TABLE model_aliases ADD COLUMN team_id    TEXT REFERENCES teams(id) ON DELETE CASCADE;
+```
+
+### Inbound auth flow (after R3)
+
+```
+inbound request → extract token from Authorization/x-api-key →
+  1. If token == LLM_GATEWAY_TOKEN env var (legacy) →
+       (team:default-synth, user:root-synth, scope:super_admin) → grant
+  2. Else: SELECT id, user_id, hash, scope, revoked_at, expires_at
+            FROM api_keys WHERE prefix = <first-12-chars>
+       bcrypt-compare token against hash
+       If match + not revoked + not expired + scope='inbound' →
+         load user.team_id → grant with (team, user, key) attribution
+  3. Else → 401 structured error {type:"unauthorized", fix:"check the API key, or issue a new one via MCP `issue_api_key`"}
+```
+
+Key invariants:
+- Plaintext token NEVER hits disk after issuance; only the bcrypt hash + prefix.
+- Lookup is O(1) by prefix (12 chars random ≈ 72 bits, more than enough for table size).
+- Legacy `LLM_GATEWAY_TOKEN` shortcut is checked FIRST so old setups skip the bcrypt cost entirely.
+
+### MCP control-plane RBAC matrix
+
+| Tool | super_admin | normal_admin | inbound |
+|---|---|---|---|
+| `list_teams`, `add_team`, `remove_team`, `rename_team` | ✓ | ✗ | ✗ |
+| `list_users` (across teams) | ✓ all | own team only | ✗ |
+| `add_user`, `remove_user`, `rename_user` | ✓ any team | own team only | ✗ |
+| `issue_api_key` (scope=inbound) | ✓ any user | own team users | ✗ |
+| `issue_api_key` (scope=mcp_super or mcp_normal) | ✓ | ✗ | ✗ |
+| `revoke_api_key`, `list_api_keys` | ✓ any | own team only | ✗ |
+| `add_provider` with `team_id=NULL` (global) | ✓ | ✗ | ✗ |
+| `add_provider` with `team_id=<own>` | ✓ any team | own team only | ✗ |
+| `set_model_alias` (alias.team_id NULL = global) | ✓ | own team only | ✗ |
+| `set_quota` (scope=team) | ✓ any team | own team only | ✗ |
+| `set_quota` (scope=key) | ✓ any key | own team's keys only | ✗ |
+| `get_usage` | ✓ any team / any key | own team only | ✗ |
+| `tail_logs`, `get_request` | ✓ all rows | own team rows only | ✗ |
+| `whoami` | ✓ | ✓ | ✗ (HTTP only; no MCP tool for inbound) |
+
+Enforcement: every MCP tool handler calls a single `requireRole(ctx, scope, team_id_predicate)` helper. Helper reads the calling token from MCP transport metadata, looks it up in `api_keys`, and gates by `scope` + ownership. **Single chokepoint** so RBAC bugs are one-fix-fits-all.
+
+### Router resolution (after R3)
+
+Priority order (replaces the existing R2 resolution rules):
+
+1. **Alias hit, scoped:**
+   - `SELECT * FROM model_aliases WHERE alias = ? AND (team_id = caller.team_id OR team_id IS NULL) ORDER BY team_id IS NULL ASC LIMIT 1` (team-specific first, then global)
+   - If found → `(alias.provider, alias.upstream_model, via_alias)`
+2. **Team-specific provider** (caller has at least one `providers` row with their `team_id`):
+   - If the request's `model` matches a kind-default (e.g., model name starts with `deepseek-`) → first matching team-specific provider
+   - Else → team-specific provider with `is_default=1`
+3. **Global default provider** (`team_id IS NULL AND is_default=1`):
+   - Pass `caller.model` through unchanged (current R2 behavior)
+4. **None of the above** → `ErrNoRoute` with diagnostic.
+
+Crucially: orphan aliases (provider was deleted) continue to return `ErrNoRoute` per F-11, unchanged. R3 just adds a scoping predicate on the WHERE clause.
+
+### Quota / rate-limit enforcement
+
+**Daily / monthly request + token caps** — checked inbound, in a single transaction with the usage UPSERT to prevent races:
+
+```sql
+-- pseudocode, executed in one SQLite txn:
+SELECT request_count, input_tokens + output_tokens AS toks_today
+  FROM usage_counters WHERE api_key_id=? AND day=?;
+SELECT max_requests, max_tokens FROM quotas
+  WHERE (scope_kind='key' AND scope_id=?) OR (scope_kind='team' AND scope_id=?)
+  ORDER BY scope_kind='key' DESC LIMIT 1;  -- key beats team
+IF current+1 > max_requests OR toks_today+est_input > max_tokens →
+  COMMIT (with current usage); return 429.
+ELSE INSERT/UPDATE usage_counters SET request_count = request_count + 1; COMMIT.
+```
+
+Token counts are credited on stream completion (we know real input + real output then). Reservation-based quota: when checking, use `est_input` = bytes/4 heuristic so a request that hasn't streamed yet can be approximated; final `output_tokens` corrects the counter on stream end.
+
+**Per-minute rate limit** — in-memory token bucket per `api_key_id`, seeded from `quotas WHERE window='minute' max_requests`. Lost on process restart (acceptable for v0.1.5 single-binary).
+
+429 response shape:
+```json
+{"error":{"type":"quota_exceeded","scope":"team","window":"day","reset_at":1747180800,"limit":1000,"current":1000,"fix":"contact your super admin to raise the limit via `set_quota`"}}
+```
+
+### New tasks (T14–T20) — added to §4 task table
+
+| # | Task | Effort | Depends |
+|---|---|---|---|
+| **T14** | Schema migration v1→v2 + Store CRUD: teams / users / api_keys / usage_counters / quotas; ALTERs on providers, request_logs, model_aliases | 1.5d | T4 |
+| **T15** | Inbound auth: api_keys lookup + bcrypt verify + prefix-indexed scan + legacy LLM_GATEWAY_TOKEN fallback | 0.75d | T14 |
+| **T16** | MCP RBAC enforcement layer (`requireRole(ctx, scope, team_pred)` helper) wired into every existing + new MCP tool | 0.75d | T7, T14 |
+| **T17** | New MCP tools: `add_team`, `remove_team`, `list_teams`, `add_user`, `list_users`, `issue_api_key`, `list_api_keys`, `revoke_api_key`, `set_quota`, `get_usage`, `whoami` | 1.5d | T16 |
+| **T18** | Router team-scoping (alias + provider WHERE-clause predicate) + per-team provider fallback chain | 0.5d | T5, T14 |
+| **T19** | Usage counter rollup (txn-safe UPSERT) + quota enforcement middleware (429 path) + token-bucket RPM limiter | 1d | T15, T18 |
+| **T20** | v0.1.5 README delta + migration guide + sample MCP client snippets for super_admin vs normal_admin onboarding flows | 0.5d | T17, T19 |
+| **v0.1.5 total** | | **~6.5 工程日** | (on top of v0.1's ~11.5d) |
+
+### v0.1 freezes — small hooks to add BEFORE v0.1 ship (preserve velocity)
+
+These are the minimum "future-proofing" diffs to in-progress / planned v0.1 work. Everything else stays on the existing trajectory.
+
+| Where | Hook | Why |
+|---|---|---|
+| **T7 MCP server (current task)** | MCP transport carries the calling token in request metadata. Even though v0.1 has only one token, expose it as `ctx.Value("mcp_token")` for handlers. | T16 needs the chokepoint to exist; expensive to retrofit later. |
+| **T11 init subcommand** | Doc-string addition: "this printed token will be auto-promoted to `scope=mcp_super` in v0.1.5; you can pass `--no-promote` then to skip and require explicit `issue_api_key`." | Set user expectation; zero code change in v0.1. |
+| **MCP tool signatures (T8/T9/T10 — planned)** | Accept an optional `team_id` field; in v0.1, defaults to `"default"` and is ignored. In v0.1.5, defaults to caller's resolved team. | Tool signature stability across the v0.1 → v0.1.5 jump. |
+
+These three hooks add roughly **+0.25 工程日** to v0.1 — small enough to absorb in Task 7.
+
+### Open Questions added (R3)
+
+- **Q17:** API key format. Proposed `lgw_<scope>_<base64rand>` where scope ∈ `{ak, msu, mna}` (inbound, mcp-super, mcp-normal). Scope inferrable from prefix without DB hit. **Lean:** adopt as drafted; confirm in CEO/Eng review.
+- **Q18:** bcrypt cost factor. **Lean:** 10 across the board for v0.1.5 (single-binary, not internet-exposed); revisit if deployments go public.
+- **Q19:** Quota window calendar-day vs rolling-24h. **Lean:** calendar-day, server-local TZ, documented limitation. Rolling-24h moves to v0.2 if asked.
+- **Q20:** Usage counter write strategy. **Lean:** synchronous (in-request UPSERT inside the auth/quota txn). Atomicity matters for quota correctness; SQLite WAL keeps cost low.
+- **Q21:** Revocation semantics on in-flight streams. **Lean:** in-flight finishes; revocation prevents only NEW requests.
+- **Q22:** Per-team provider visibility. **Lean:** strict isolation — team B's super admin sees only own-team providers + global defaults; cross-team provider metadata is hidden.
+- **Q23:** Whether `add_team` should auto-create a `super_admin` user-zero or require a separate `add_user` call. **Lean:** auto-create `root@<team-slug>` user with no API key issued (operator must explicitly `issue_api_key`); zero-keys-issued state is fine.
+- **Q24:** What happens to existing single-provider config the first time someone runs `add_team`? Does the existing provider stay global (`team_id=NULL`) or migrate to the new team? **Lean:** stay global, no automatic association — caller explicitly chooses scope.
+
+### Failure modes added (R3)
+
+- **FM-R3-1:** Legacy token + multi-tenant data coexist. Operator upgrades, has `LLM_GATEWAY_TOKEN` env, runs `add_team acme`. Now there's both a synthesized "default" team AND a real team. **Test:** legacy token continues to resolve to "default"; super admin operations on "acme" work via either path.
+- **FM-R3-2:** `mcp_super` key revoked mid-call. Existing call completes; next call returns auth error. MCP subprocess must surface this cleanly so the agent can request a fresh key.
+- **FM-R3-3:** Quota race — two concurrent requests both pass quota check, both increment counter, total now over cap. **Mitigation:** SQLite txn with `UPDATE usage_counters SET request_count = request_count + 1 WHERE request_count + 1 <= cap RETURNING *`; if rowsAffected=0 → 429.
+- **FM-R3-4:** Prefix enumeration. Prefix is displayable; an attacker who learns a prefix gains zero secret material (bcrypt). Acceptable.
+- **FM-R3-5:** Per-team provider misconfigured (team has provider row, but upstream key revoked at vendor). Router still selects it; first request fails 401 at upstream. **Surface clearly:** include team-provider attribution in the structured error so the operator knows which team's key broke.
+- **FM-R3-6:** Migration v1→v2 fails mid-statement (e.g., disk full during ALTER). SQLite is transactional per statement; failed ALTER leaves schema at v1. **Test:** start fresh v0.1.5 binary against a corrupted state.db; assert it refuses to start with a clean error and a `--skip-migration` opt-out for emergency rollback.
+- **FM-R3-7:** Token reuse across scopes. Operator copies a `mcp_super` token into a coding agent's `Authorization: Bearer` field. **Mitigation:** at inbound auth, reject tokens whose `scope != 'inbound'` with a specific error: "this is an admin token; issue an inbound key via `issue_api_key`."
+
+### Decision Audit Trail addendum (R3 pre-review)
+
+| # | Decision | Classification | Principle | Origin |
+|---|---|---|---|---|
+| R3-1 | Multi-tenancy as v0.1.5 additive (not Revision-to-v0.1, not v0.2) | strategic | P2 (boil lakes within blast radius) + P3 (pragmatic — preserve v0.1 ship velocity) | Premise gate D1=C |
+| R3-2 | Per-team provider optional, falls back to global default | mechanical | P5 (explicit over clever) | User scope answer |
+| R3-3 | MCP RBAC tiers: super_admin / normal_admin only | mechanical | P5 + P3 | User scope answer |
+| R3-4 | Quotas enforced (not just observed) | strategic | P1 (completeness) | User scope answer |
+| R3-5 | API keys stored as bcrypt hash, plaintext shown ONCE at issuance | mechanical | Standard practice + F-DX-09 partial mitigation | Eng common practice |
+| R3-6 | Legacy `LLM_GATEWAY_TOKEN` env keeps working forever; no forced migration | strategic | P3 + DX (backward compat) | Premise gate ELI10 |
+| R3-7 | v0.1.5 schema is purely ALTER + new tables (zero destructive DDL) | mechanical | P5 + safety | R3-1 implication |
+| R3-8 | MCP tool signatures gain optional `team_id` field in v0.1 already (defaults ignored) | mechanical | P3 (cheap hook now vs expensive retrofit later) | v0.1 freezes section |
+| R3-9 | RBAC enforced via single `requireRole(ctx, scope, team_pred)` chokepoint | mechanical | P5 (single fix surface) | Standard pattern |
+| R3-10 | Token bucket RPM in-memory only (reset on restart) | strategic | P3 — SQLite-backed rate limit deferred to v0.2 | Effort/value tradeoff |
+
+### What R3 leaves OPEN (deferred to v0.2 / v0.3)
+
+- **Encryption-at-rest for `providers.api_key` AND `users.email`** — still F-DX-09 gap. Tracked as Task 4.5; v0.1.5 ships without it. Note: api_keys.hash is bcrypt'd, so the most-sensitive secret IS at-rest-safe.
+- **Audit log of admin actions** (who created which team, who revoked which key) — propose `admin_audit` table in v0.1.6 if R3 ships and demand emerges.
+- **OAuth / SSO** for user identity — out of scope. v0.1.5 users are identified only by team_id+email (no auth handshake); API keys remain the only auth factor.
+- **Cost tracking ($ per request)** — Already in TODOS.md as v0.2 item; R3 confirms it stays there. Token counts are sufficient for usage views; multiplication by per-model $/token comes later.
+- **HTTP/SSE MCP transport** — Still v0.2 per TODOS.md UC-4; multi-tenancy doesn't change the verdict.
+- **Per-key telemetry surfaced in `list_api_keys`** (e.g., `remaining_today` snapshot) — nice-to-have; defer to "next" if asked.
+
+### What Plan Revision 3 produces (deliverables checklist)
+
+When R3 ships as v0.1.5:
+
+- [ ] Schema migration v1→v2 applied idempotently on first boot of v0.1.5 against any v0.1 state.db
+- [ ] `add_team`, `add_user`, `issue_api_key` MCP tools functional from `super_admin` token
+- [ ] Inbound HTTP recognizes BOTH legacy `LLM_GATEWAY_TOKEN` and new `lgw_ak_*` keys
+- [ ] `tail_logs` filtered by team_id when called with `normal_admin` scope
+- [ ] `set_quota` + `get_usage` operate per spec
+- [ ] 429 response on quota exceed with structured `fix:` guidance
+- [ ] README v0.1.5 section showing "upgrade from v0.1 takes one MCP call: `add_team`"
+
+---
+
+## Plan Revision 3 — CEO Review (2026-05-13)
+
+**Mode:** /autoplan Phase 1, dual-voice attempted; Codex `[codex-unavailable]` (binary missing on machine). Single-voice review by Claude subagent, marked `[subagent-only]` per autoplan degradation matrix. Per skill rule "Single critical finding from one voice = flagged regardless."
+
+### CEO Consensus Table (single voice — most cells N/A)
+
+| Dimension | Claude subagent | Codex | Consensus |
+|---|---|---|---|
+| 1. Premises valid? | ✗ (P1 reversal is partial/incoherent) | N/A | FLAGGED |
+| 2. Right problem to solve? | Mixed — multi-tenancy is real ask; framing wrong | N/A | FLAGGED |
+| 3. Scope calibration correct? | ✗ (additive is wrong call vs B halt+redo) | N/A | FLAGGED |
+| 4. Alternatives sufficiently explored? | ✗ (B dismissed too cheaply at premise gate) | N/A | FLAGGED |
+| 5. Competitive/market risks covered? | ✗ (LiteLLM home-turf entry not interrogated) | N/A | FLAGGED |
+| 6. 6-month trajectory sound? | ✗ (users.email + binary RBAC create cliff) | N/A | FLAGGED |
+
+### Findings (10)
+
+**F-R3-CEO-1 — "Additive opt-in" is a self-deception. [critical]**
+What's wrong: every inbound request now traverses a multi-tenant auth path with a legacy-shortcut branch, doubling the auth surface area regardless of operator opt-in. Calling the legacy path "opt-in" hides that you are shipping two products in one binary.
+Fix: replace the "opt-in" language in Premise delta and Backward Compatibility Contract §1 with explicit deprecation: "v0.1.5 is multi-tenant; legacy code path is removed at v0.2 (date)." Add a deprecation entry to §1 with a v0.3 removal target, OR carry two auth paths forever.
+
+**F-R3-CEO-2 — Premise-gate option C was the wrong call vs option B. [critical]**
+What's wrong: R3 adds 5 tables, 4 ALTERs, new auth flow, RBAC chokepoint, quota enforcement, router scoping — this is a re-foundation, not a layer. Every v0.1 task touching storage/auth/router must be re-validated under the new schema anyway, so the "preserve velocity" argument is thin.
+Fix: either (i) halt T7 now, fold T14–T19 into v0.1, ship one coherent multi-tenant v0.1 — collapse v0.1/v0.1.5 distinction; OR (ii) cut R3 scope to teams+users+api_keys only and defer quotas, per-team providers, double-tier RBAC to v0.2. The current path is the worst of both — too much schema to be "additive," too little discipline to be a clean redo.
+
+**F-R3-CEO-3 — Binary RBAC (super_admin / normal_admin) forces Revision 4 within one quarter. [high]**
+What's wrong: real multi-tenant deployments need at least a read-only auditor (compliance, finance) and a billing-only role (cost dashboards without provider keys). Collapsing those into `normal_admin` leaks provider API keys to anyone who can see usage.
+Fix: widen `api_keys.scope` enum to `{inbound, mcp_super, mcp_admin, mcp_auditor, mcp_billing}` with explicit stubs + helpful rejection for unimplemented scopes, OR rename column to `role` and add a `permissions` JSON column so future roles don't require migration.
+
+**F-R3-CEO-4 — Quota without $-billing is a foot-gun. [high]**
+What's wrong: first user to hit a token quota asks "how much did that cost me?" — token caps without cost caps means operator hand-computes $ from request_logs, defeating quota's value.
+Fix: either (i) add `model_costs(provider, model, usd_per_input_1k, usd_per_output_1k)` table and surface `$_today` in `get_usage` — ~0.25d work; OR (ii) remove quota enforcement from R3, ship usage *observation* only, defer enforcement until cost is in scope.
+
+**F-R3-CEO-5 — Per-team provider fallback to global = data-leakage. [high]**
+What's wrong: when team B has no provider and global is team A's key, team B's requests bill team A's vendor account and prompts traverse team A's infra — no consent, no audit, no cost-attribution column on `request_logs` to disambiguate "team-billed" from "global-billed."
+Fix: add `providers.fallback_eligible BOOLEAN NOT NULL DEFAULT 0`; global providers must explicitly opt in to serving non-owning teams. Add `request_logs.provider_owner_team_id` denormalized column. Document Q22 default = OFF, not ON.
+
+**F-R3-CEO-6 — `users.email` as identity-only with no auth handshake is indefensible. [high] [single-most-important]**
+What's wrong: plan says users identified by `(team_id, email)` and "API keys remain the only auth factor" — but super_admin can `issue_api_key` for any email in any team, so the trust model collapses to "whoever holds super_admin token IS every user." It's identity without identity.
+Fix: **drop the `users` table from R3 entirely.** API keys belong to teams, not to fictional users. Add `api_keys.created_for_label TEXT` free-form ("Cline laptop", "joy's CI"). When real auth lands in v0.2 (OAuth/SSO), introduce `users` then with actual auth meaning.
+
+**F-R3-CEO-7 — "Preserve v0.1 ship velocity" is rationalization. [medium]**
+What's wrong: v0.1 is 9/13 done with T7 in-progress; +0.25d freeze hooks + 6.5d v0.1.5 means the actual delta over B (halt+redo) is ~1-2 days, not catastrophic.
+Fix: add an honest effort comparison to Decision Audit Trail: "B (halt+redo): +2d to v0.1 ship, one product. C (additive): +0.25d to v0.1, +6.5d to v0.1.5, indefinite two-product maintenance." If C wins on that table, it wins for the right reasons.
+
+**F-R3-CEO-8 — Competitive positioning weakens, not strengthens. [high]**
+What's wrong: differentiation thesis is "AI-native MCP-only, Chinese-provider-first, single-binary." R3 enters LiteLLM's strength zone (multi-tenancy, quotas, RBAC) where LiteLLM has multi-year head start, while doing nothing to deepen actual moats.
+Fix: add a "Competitive delta" subsection to R3 naming LiteLLM explicitly. Answer: "what does v0.1.5 do that LiteLLM does not, that justifies the user staying?" If only "MCP-only control plane," then R3 should invest there (richer MCP tools, agent-driven team provisioning flows) instead of re-implementing LiteLLM's table stakes.
+
+**F-R3-CEO-9 — Quota race mitigation contradicts the §Quota pseudocode. [medium]**
+What's wrong: §Quota section shows non-atomic SELECT-then-INSERT, FM-R3-3 promises atomic `UPDATE...WHERE...RETURNING`. These are different mechanisms; the SELECT-then-INSERT version is racy.
+Fix: replace pseudocode with atomic `UPDATE usage_counters SET request_count = request_count + 1 WHERE api_key_id=? AND day=? AND request_count + 1 <= cap RETURNING *` form. Add a concurrency test (50 parallel requests vs cap=10) to T19 acceptance criteria.
+
+**F-R3-CEO-10 — Migration rollback is one-way only. [medium]**
+What's wrong: FM-R3-6 mentions `--skip-migration` for rollback but schema additions aren't reversible — a v0.1.5 binary that wrote to teams/users/api_keys cannot be downgraded to v0.1 without data loss.
+Fix: either (i) commit to no rollback and remove `--skip-migration` from FM-R3-6 (false comfort); OR (ii) add `dump-v1-compatible` MCP tool that exports legacy-shape state.db for downgrade. Pick one, document honestly.
+
+### Strategic Risk Synthesis
+
+R3 is a tactical retreat dressed as strategic advance. User asked for multi-tenancy, plan delivers it, but the "additive, opt-in, preserves velocity" framing papers over the fact that v0.1.5 fundamentally changes what the product IS. The original wedge ("AI-native single-binary MCP-controlled gateway for Chinese providers, single-user scope") was sharp + defensible vs LiteLLM. R3 dulls that wedge by entering LiteLLM's home turf (teams, quotas, RBAC) without years of polish LiteLLM has there, while adding two-code-path maintenance burden, a fake identity layer (`users.email` with no auth), and a binary RBAC tier that won't survive contact with real deployments. The 6.5-day estimate is plausible for code; the indefinite maintenance tax of two auth paths + two tenancy models is not in the estimate at all.
+
+### Verdict
+
+**REJECT** — current R3 should be revised before proceeding to v0.1.5 implementation.
+
+### Single Most Important Change
+
+**Delete the `users` table from R3.** `users.email` as identity-only is the load-bearing self-deception. Removing it cuts ~15% of the schema, eliminates the "identity without auth" boundary, and forces the plan to confront whether v0.1.5 is actually about multi-tenancy OR just about API key issuance — the latter being a much smaller, much shippable feature.
+
+### Auto-Decided CEO Findings Summary (per autoplan 6 principles)
+
+Per autoplan rule: critical findings from a single voice are **flagged but not auto-decided** — they surface at the Phase 4 final gate as user-challenge candidates. Mediums get auto-decided where the 6 principles fit; criticals/highs get user judgment.
+
+| # | Severity | Auto-decided? | Decision / Surface-at-gate |
+|---|---|---|---|
+| F-R3-CEO-1 | critical | NO — surface at gate | Phrased as user-challenge: "drop legacy LLM_GATEWAY_TOKEN path entirely, OR keep but add v0.3 removal date?" |
+| F-R3-CEO-2 | critical | NO — surface at gate | Re-opens premise gate D1: C vs B vs A. Most important question. |
+| F-R3-CEO-3 | high | NO — surface at gate | "widen scope enum now (cheap)" vs "stay binary (clean)"; needs user judgment |
+| F-R3-CEO-4 | high | NO — surface at gate | "add $-billing now (~0.25d)" vs "remove quota enforcement"; both are real options |
+| F-R3-CEO-5 | high | YES — apply fix | `fallback_eligible BOOLEAN DEFAULT 0` is mechanical P5 (explicit over clever). Update Q22 default to OFF. |
+| F-R3-CEO-6 | high | NO — surface at gate | Single Most Important Change. Drops `users` table entirely. |
+| F-R3-CEO-7 | medium | YES — apply fix | Add honest effort comparison table to R3 Decision Audit Trail. P5 (explicit) |
+| F-R3-CEO-8 | high | NO — surface at gate | Competitive delta subsection — needs user direction on what *to* invest in if not in LiteLLM-parity |
+| F-R3-CEO-9 | medium | YES — apply fix | Update §Quota pseudocode to atomic UPDATE...RETURNING form. P5 + correctness |
+| F-R3-CEO-10 | medium | YES — apply fix | Remove `--skip-migration` from FM-R3-6 (it's false comfort); add explicit "no rollback in v0.1.5; downgrade requires fresh state.db" |
+
+Mechanically-applied fixes (CEO-5, CEO-7, CEO-9, CEO-10) will be appended to R3 charter as a "CEO Auto-Decided Patches" subsection when Phase 4 gate is reached and other phases' findings are merged.
+
+---
+
+## Plan Revision 3 — Eng Review (2026-05-13)
+
+**Mode:** /autoplan Phase 3, dual-voice attempted; Codex `[codex-unavailable]`. Single-voice review by Claude subagent, marked `[subagent-only]`.
+
+### Eng Consensus Table (single voice — most cells N/A)
+
+| Dimension | Claude subagent | Codex | Consensus |
+|---|---|---|---|
+| 1. Architecture sound? | Mixed — chokepoint pattern fragile | N/A | FLAGGED |
+| 2. Test coverage sufficient? | ✗ (12 new test files identified) | N/A | FLAGGED |
+| 3. Performance risks addressed? | ✗ (bcrypt-on-every-request) | N/A | FLAGGED |
+| 4. Security threats covered? | ✗ (revocation race, prefix collision) | N/A | FLAGGED |
+| 5. Error paths handled? | Mixed (rollback story weak) | N/A | FLAGGED |
+| 6. Deployment risk manageable? | ✗ (migration idempotency unclear) | N/A | FLAGGED |
+
+### Findings (12)
+
+**F-R3-ENG-1 — `ALTER TABLE ... REFERENCES` is silently weaker than declared. [high]**
+`modernc.org/sqlite` honors SQLite's `ADD COLUMN ... REFERENCES` only with `NULL` default; FK not enforced for pre-existing rows. `database/sql` pool means different conns may have differing PRAGMA state.
+Fix: write `internal/store/migrations/002_multitenancy.sql` with `ALTER TABLE providers ADD COLUMN team_id TEXT NULL REFERENCES teams(id) ON DELETE CASCADE` AND set `_pragma=foreign_keys(1)` on every conn (already in `buildDSN`, but verify it sticks). Add `TestMigration_FKEnforcement` integration test.
+
+**F-R3-ENG-2 — bcrypt cost=10 on inbound hot path = 60–100ms per request, fatal for streaming TTFB. [critical]**
+Inbound auth runs bcrypt every request. M-class silicon: ~60ms; cheap VMs: 120–150ms. No verification cache. A coding agent doing 30 streams/min pays bcrypt 30 times.
+Fix: add `internal/auth/cache.go` — `sync.Map` keyed by hash with TTL=60s, capacity-bounded. On hit: skip bcrypt. On miss: bcrypt + insert. Invalidate via process-wide `revocationEpoch atomic.Int64` bumped by `RevokeAPIKey()`; entries stamped with epoch at insert, force re-check if `entry.epoch < currentEpoch`. Document warm-path = ~5µs, cold-path = ~80ms. Optionally lower bcrypt cost to 8 (~15ms) if cache cannot be shipped.
+
+**F-R3-ENG-3 — §Quota pseudocode contradicts FM-R3-3; current §Quota version is racy. [critical]**
+§Quota shows `SELECT current; check; INSERT/UPDATE` (non-atomic). FM-R3-3 promises atomic `UPDATE...WHERE...RETURNING`. Two writers can both pass the SELECT.
+Fix: replace §Quota body with FM-R3-3's single-statement form: `UPDATE usage_counters SET request_count = request_count + 1 WHERE api_key_id=? AND day=? AND request_count + 1 <= cap RETURNING *`. Two-phase reserve/commit for token caps (input estimated at reserve, real input+output at commit; rollback on stream error via `defer quota.RollbackReservation(reqID)`). Add `TestQuotaRace_100Goroutines_ExactlyCapAccepted` to `internal/quota/quota_test.go`.
+
+**F-R3-ENG-4 — In-memory token bucket loses state on restart → deterministic burst exploit. [high]**
+R3-10 admits restart-resets. Combined with `systemd` restart loops or OOM-induced restarts, adversary triggering restart resets the bucket. No documented burst tolerance contract.
+Fix (TWO OPTIONS — surface at gate):
+- (a) Document explicitly: "RPM is best-effort; over-burst window ≤ uptime since last restart, max burst = max_requests per restart event." Add `TestRPMBurst_AfterRestart_GrantsFullBucket` capturing the limitation.
+- (b) Persist bucket state in `usage_counters` keyed by `unix_minute = unix_seconds/60`. One row per active key per minute. Adds ~0.5d to T19.
+Lean: (a) for v0.1.5 (pragmatic + documented), (b) for v0.2 if real abuse seen.
+
+**F-R3-ENG-5 — Prefix-collision probability non-negligible; schema doesn't enforce uniqueness. [high]**
+12-char prefix has ~24–30 bits of random entropy after the `lgw_<scope>_` fixed bytes. At N=10000 keys, birthday-collision probability ~5–25%. `idx_api_keys_prefix` is non-unique. SELECT returns one row implicitly; on collision, lookup arbitrarily picks one.
+Fix: widen `prefix` to first 16 chars (8 random base64 chars ≈ 48 bits, negligible at N=1M) AND make index UNIQUE: `CREATE UNIQUE INDEX idx_api_keys_prefix ON api_keys(prefix)`. Regenerate-on-collision at issuance in `Store.IssueAPIKey`. Add `TestPrefixCollision_RegenerateRetry`.
+
+**F-R3-ENG-6 — `usage_counters.day` is wall-clock; DST creates 23h/25h buckets. [medium]**
+`day = unix_millis / 86_400_000` server-local-TZ. DST spring-forward = 23h day, fall-back = 25h. A 90-min stream straddling midnight credits the start-day, doubling that bucket.
+Fix: use UTC `day = time.Now().UTC().UnixMilli() / 86_400_000`. Credit usage at stream-START time (known) not completion. Document: "day is UTC; users in non-UTC TZ see midnight at non-local-midnight; intentional for v0.1.5." Add `TestUsageRollup_MidnightUTCBoundary`.
+
+**F-R3-ENG-7 — `requireRole` chokepoint is single-point-of-failure; closure-based predicate has wide API surface. [high]**
+"Single chokepoint" promised; reality: chokepoint PLUS N correctly-constructed predicates. If a tool handler forgets to resolve target team_id from request (e.g., `set_quota` scope=key needs to resolve `api_key.user.team_id`, not the request's claimed team_id), it leaks.
+Fix: replace closure pattern with declarative ACL: `type ToolACL struct { Scope Scope; OwnershipResolver func(args) (team_id, error) }` registered in `aclRegistry map[string]ToolACL` at startup. MCP server calls `requireRole(ctx, registry[toolName])` before dispatch. Add `internal/mcp/rbac_matrix_test.go` with table-driven `TestRBACMatrix` walking every (tool, caller_scope, caller_team, target_team) tuple. Add `go-fuzz` target `FuzzRequireRole`.
+
+**F-R3-ENG-8 — Migration idempotency relies on `user_version` but ALTERs need explicit txn wrapping. [high]**
+`modernc.org/sqlite v1.x` embeds SQLite ≥3.45 (DDL-in-txn supported). Plan doesn't say "wrap migration in `BEGIN; ... COMMIT;` and bump `user_version` inside the txn." FM-R3-6's "failed ALTER leaves schema at v1" is only true if each ALTER auto-commits.
+Fix: `internal/store/migrate.go` does `BEGIN IMMEDIATE; <ALTERs>; PRAGMA user_version=2; COMMIT;`. Verify embedded SQLite reports `>=3.35` at startup; refuse to start otherwise. Add `TestMigration_PartialFailure_RollsBack` injecting forced error mid-migration. Gate `--skip-migration` behind `--i-know-what-im-doing` flag.
+
+**F-R3-ENG-9 — `model_aliases` PK isn't widened; two teams cannot have same alias name. [high]**
+Original `model_aliases` PK is single-column `alias`. R3 adds `team_id` but doesn't redefine PK to `(alias, team_id)`. Team A `fast`→`glm-prod` + Team B `fast`→`deepseek` fails with UNIQUE constraint. Per-team alias feature silently broken.
+Fix: SQLite can't ALTER PK. Migration must `CREATE TABLE model_aliases_v2 (alias TEXT NOT NULL, team_id TEXT REFERENCES teams(id) ON DELETE CASCADE, provider_name TEXT NOT NULL REFERENCES providers(name) ON DELETE CASCADE, upstream_model TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (alias, team_id))`, `INSERT INTO model_aliases_v2 SELECT alias, NULL AS team_id, provider_name, upstream_model, created_at FROM model_aliases`, `DROP TABLE model_aliases`, `ALTER TABLE model_aliases_v2 RENAME TO model_aliases`. Update §Schema additions block to reflect this. Add `TestAlias_SameNameDifferentTeams_BothResolve`.
+
+**F-R3-ENG-10 — Revocation race window exploitable. [medium]**
+Q21 says in-flight finishes. But auth check happens BEFORE stream-open. Sequence: t=0 attacker sends; t=1 server starts auth lookup; t=2 admin revokes; t=3 lookup completes with stale cached `revoked_at IS NULL` and grants. Combined with F-R3-ENG-2's cache (60s TTL), gives 60s of post-revocation access.
+Fix: epoch-gated cache from F-R3-ENG-2 fix. Add `TestRevocation_InvalidatesCache_WithinOneRequest` to `internal/auth/cache_test.go`.
+
+**F-R3-ENG-11 — `api_keys.user_id ON DELETE CASCADE` silently destroys audit linkage. [medium]**
+If a user is removed, all `api_keys` rows vanish, `usage_counters` rows vanish, `request_logs.api_key_id` becomes NULL. Lose attribution of past requests.
+Fix: change to `ON DELETE RESTRICT` for `api_keys.user_id`; require explicit `revoke_api_key` before `remove_user`. Document: user-delete with active keys returns structured error pointing admin to revoke first.
+
+**F-R3-ENG-12 — Token-scope rejection requires reading scope before bcrypt, but scope is in the bcrypt'd row. [medium]**
+FM-R3-7: reject `scope != 'inbound'` at inbound. Q17: scope inferrable from prefix. Plan documents both mechanisms; pick one as authoritative.
+Fix: first-line in `internal/auth/middleware.go`: `if !strings.HasPrefix(token, "lgw_ak_") && token != legacyToken { return 401 }`. DB-resident scope check is defense-in-depth backup. Add `TestInboundAuth_RejectsMCPScopeToken_NoDoublePath`.
+
+### Architecture Dependency Diagram (R3-aware)
+
+```
+HTTP inbound (/v1/chat/completions, /v1/messages)
+        |
+        v
++----------------------------+
+| auth.Middleware            |<--- LLM_GATEWAY_TOKEN (env, legacy fast-path; eq compare)
+|  - prefix-scope precheck   |
+|  - cache.Lookup(prefix)----+--> auth.Cache (sync.Map, TTL=60s, epoch-gated) <----+
+|  - bcrypt.Compare (cold)   |                                                     |
+|  - emit (team, user, key)  |                                                     |
++-------------+--------------+                                                     |
+              |                                                                    |
+              v                                                                    |
++----------------------------+                                                     |
+| quota.Reserve(keyID)       |                                                     |
+|  - single UPDATE-RETURNING |                                                     |
+|  - rpm.TokenBucket (mem)   |                                                     |
++-------------+--------------+                                                     |
+              v                                                                    |
++----------------------------+                                                     |
+| router.Resolve(req,team)   |                                                     |
+|  - alias (team OR NULL)    |                                                     |
+|  - provider scoping        |                                                     |
++-------------+--------------+                                                     |
+              v                                                                    |
+        upstream call --> stream                                                   |
+              |                                                                    |
+              v                                                                    |
++----------------------------+                                                     |
+| usage.Commit(keyID, toks)  |---> store.UPSERT usage_counters (day=UTC)           |
++----------------------------+                                                     |
+                                                                                   |
+MCP stdio inbound                                                                  |
+        |                                                                          |
+        v                                                                          |
++----------------------------+                                                     |
+| mcp.Server (T7)            |                                                     |
+|  - reads token from xport  |                                                     |
++-------------+--------------+                                                     |
+              v                                                                    |
++----------------------------+                                                     |
+| rbac.requireRole(ctx,acl)  |---> aclRegistry[toolName] (declarative, T16)        |
++-------------+--------------+                                                     |
+              v                                                                    |
++----------------------------+                                                     |
+| tools/{teams,users,keys,   |---- store.{Issue,Revoke}APIKey -----> bumps epoch --+
+|  quotas,usage,logs}        |
++----------------------------+
+```
+
+### Test Plan Delta (12 new test files)
+
+- `internal/store/migrate_test.go` — `TestMigrate_v1_to_v2_Idempotent`, `TestMigrate_PartialFailure_RollsBack`, `TestMigrate_FreshDB_GoesDirectlyToV2`, `TestMigrate_RejectsOldSQLite`
+- `internal/store/api_keys_test.go` — `TestIssueAPIKey_ReturnsPlaintextOnce`, `TestPrefixCollision_RegenerateRetry`, `TestRevoke_Idempotent`, `TestRevoke_PreservesLogAttribution`, `TestBcrypt_CostFactor10`
+- `internal/store/teams_test.go` — `TestAddTeam_SlugUnique`, `TestRemoveTeam_CascadesToOwnedResources`, `TestRemoveTeam_RefusesIfActiveKeys` (per F-R3-ENG-11)
+- `internal/store/aliases_test.go` — `TestAlias_SameNameDifferentTeams_BothResolve`, `TestAlias_GlobalFallback_WhenTeamAliasMissing`, `TestAlias_OrphanReturnsErrNoRoute` (regression for F-11)
+- `internal/store/usage_test.go` — `TestUsage_UpsertConcurrent`, `TestUsageRollup_MidnightUTCBoundary`, `TestUsage_ReservationRolledBackOnStreamError`
+- `internal/auth/middleware_test.go` — `TestLegacyToken_FastPath_SkipsBcrypt`, `TestNewKey_BcryptVerify`, `TestRevokedKey_Rejected`, `TestExpiredKey_Rejected`, `TestMCPScopeToken_RejectedAtInbound` (F-R3-ENG-12), `TestNoToken_401WithFix`
+- `internal/auth/cache_test.go` — `TestCache_HitSkipsBcrypt`, `TestCache_EvictsOnTTL`, `TestRevocation_InvalidatesCache_WithinOneRequest`, `TestCache_EpochGated`
+- `internal/quota/quota_test.go` — `TestQuotaRace_100Goroutines_ExactlyCapAccepted`, `TestQuota_KeyBeatsTeam`, `TestQuota_TokenCap_ReserveCommitTwoPhase`, `TestQuota_429ResponseShape`
+- `internal/quota/rpm_test.go` — `TestRPMBurst_FreshBucket`, `TestRPMBurst_AfterRestart_GrantsFullBucket`, `TestRPMBurst_AcrossKeys_Isolated`
+- `internal/mcp/rbac_test.go` — `TestRequireRole_RejectsRevoked`, `TestRequireRole_ScopeMismatch`, `TestRequireRole_TeamMismatch`
+- `internal/mcp/rbac_matrix_test.go` — table-driven `TestRBACMatrix` covering all 14 rows × 3 scopes; `FuzzRequireRole` go-fuzz target
+- `internal/integration/upgrade_v1_to_v2_test.go` — boot v0.1 binary, write rows, boot v0.1.5, assert read-through; covers the upgrade migration path end-to-end
+
+### Verdict
+
+**REJECT** — F-R3-ENG-2 (bcrypt-on-every-request kills streaming TTFB), F-R3-ENG-3 (race vs FM-R3-3 contract contradiction), F-R3-ENG-9 (alias PK silently breaks per-team alias feature) are showstoppers as written. Each is fixable in <0.5d, but the plan must be patched before T14 starts.
+
+### Single Most Important Fix
+
+Add `internal/auth/cache.go` with epoch-gated in-memory verification cache (TTL=60s) AND atomically resolve the §Quota / FM-R3-3 contradiction by adopting the single-statement `UPDATE usage_counters SET request_count = request_count + 1 WHERE request_count + 1 <= cap RETURNING *` form as the sole contract. Without these two, every inbound request costs 60–100ms and the documented quota guarantee is unenforceable, negating v0.1.5's value proposition.
+
+### Auto-Decided Eng Findings Summary
+
+| # | Severity | Auto-decided? | Decision |
+|---|---|---|---|
+| F-R3-ENG-1 | high | YES — apply fix | mechanical (P5) — explicit DEFAULT NULL + DSN pragma audit |
+| F-R3-ENG-2 | critical | YES — apply fix | mechanical engineering need; no taste decision on whether-to-cache |
+| F-R3-ENG-3 | critical | YES — apply fix | correctness; replace §Quota body with UPDATE-RETURNING |
+| F-R3-ENG-4 | high | NO — surface at gate | (a) doc-the-limitation vs (b) SQLite-backed bucket; user picks |
+| F-R3-ENG-5 | high | YES — apply fix | mechanical (P1 completeness) — 16-char UNIQUE prefix + regen-on-collision |
+| F-R3-ENG-6 | medium | YES — apply fix | UTC + credit-at-start; mechanical |
+| F-R3-ENG-7 | high | YES — apply fix | declarative ACL registry (P5 explicit) + matrix test |
+| F-R3-ENG-8 | high | YES — apply fix | transactional migration + sqlite version check |
+| F-R3-ENG-9 | high | YES — apply fix | feature would silently break otherwise; required correctness |
+| F-R3-ENG-10 | medium | YES — apply fix | epoch-gated cache (subsumed by ENG-2 fix) |
+| F-R3-ENG-11 | medium | YES — apply fix | ON DELETE RESTRICT preserves audit; mechanical |
+| F-R3-ENG-12 | medium | YES — apply fix | prefix-scope precheck = defense-in-depth, mechanical |
+
+11 auto-decided fixes; only F-R3-ENG-4 (token bucket strategy) gets surfaced at the gate as a user taste decision.
+
+---
+
+## Plan Revision 3 — DX Review (2026-05-13)
+
+**Mode:** /autoplan Phase 3.5, dual-voice attempted; Codex `[codex-unavailable]`. Single-voice review by Claude subagent, marked `[subagent-only]`.
+
+### DX Consensus Table (single voice — most cells N/A)
+
+| Dimension | Claude subagent | Codex | Consensus |
+|---|---|---|---|
+| 1. Getting started < 5 min? | ✗ (8–18 min super_admin TTHW) | N/A | FLAGGED |
+| 2. API/CLI naming guessable? | Mixed (verb inconsistency) | N/A | FLAGGED |
+| 3. Error messages actionable? | ✗ (only 429 specified) | N/A | FLAGGED |
+| 4. Docs findable & complete? | ✗ (T20 undercooked) | N/A | FLAGGED |
+| 5. Upgrade path safe? | Mixed (silent upgrade) | N/A | FLAGGED |
+| 6. Dev environment friction-free? | ✗ (5 client configs, no helper) | N/A | FLAGGED |
+
+### Developer Journey Map (9-stage, condensed)
+
+| Stage | Time | Top friction |
+|---|---|---|
+| 1. Download | 30s | Install line unspecified (go install / GH release / Homebrew) |
+| 2. Init | 30s | No terminal-output sample for v0.1.5; legacy vs new token format unclear |
+| 3. Start | 10s | No "v0.1.5; legacy detected; default team synthesized" banner spec |
+| 4. **Connect MCP** | **5–15 min** | **Biggest hidden cost: 5 client config formats, 0 committed snippets** |
+| 5. Create team | 5s | `add_team` request/response shape undefined in plan |
+| 6. Create user | 5s | `users.email` is identity-without-auth (echoes CEO-6) |
+| 7. Issue API key | 10s | Plaintext shown ONCE; no response shape; no recovery if lost |
+| 8. Distribute key | varies | Zero affordances; out-of-band by design, undocumented |
+| 9. First inbound | 30s | Header matrix (`Authorization: Bearer` vs `x-api-key`) per endpoint unlocked |
+
+**Super_admin TTHW:** 8–18 min, dominated by client config editing. **Normal_admin recipient TTHW:** 3–10 min with snippets, 20+ without.
+
+### Findings (12)
+
+**F-R3-DX-1 — Boot output unspecified; silent upgrade = silent confusion. [critical]**
+No "what's new" banner, no `init` output spec, no migration-success line. Fix: T11/T15 acceptance must include exact stdout lines covering schema version, migration applied, legacy env detection, synthesized team, and next-step command.
+
+**F-R3-DX-2 — MCP client snippet coverage undefined; T20 is half a day for an unspecified deliverable. [critical]**
+Fix: name the 5 clients (Claude Desktop, Cline, Cursor, Continue, ZED), commit to one canonical config per client in T20, AND add `llm-gateway mcp-config --client=<name>` subcommand to T11 scope (~0.25d). Subcommand pays back T20 effort and erases the 10-min friction point.
+
+**F-R3-DX-3 — Token-format scope confusion is built into the design. [high]**
+`lgw_ak_*` / `lgw_msu_*` / `lgw_mna_*` are opaque. Operator looking at three strings can't tell which is inbound vs MCP admin vs MCP normal. Fix: rename to human-readable `lgw_inbound_*`, `lgw_admin_*`, `lgw_team_*`. At MCP transport, reject `lgw_inbound_*` with: "this is an inbound API key, paste it into your client app, not your MCP config."
+
+**F-R3-DX-4 — Lost-key recovery is unspecified. [high]**
+v0.1 has env fallback as recovery; v0.1.5's legacy fast-path IS the recovery path but never stated. Fix: add "Recovery" subsection: "lost all `mcp_super` tokens → restart with `LLM_GATEWAY_TOKEN=<anything-new>`; legacy fast-path resynthesizes super_admin; `issue_api_key scope=mcp_super`; unset env."
+
+**F-R3-DX-5 — Error message audit is partial; only 429 specified. [high]**
+Fix: spec 401 (4 distinct `type`s: revoked / expired / scope_mismatch / unknown_key), 403 (forbidden with `required_scope` + `your_scope` + `fix`), 404 (not_found with resource + id + fix), 409 (conflict with field + value + fix). Add error reference table to T20.
+
+**F-R3-DX-6 — `whoami` payload undefined; agent tool-discovery broken. [high]**
+RBAC matrix lists `whoami` but no return shape. Fix: spec response as `{scope, team_id, team_slug, user_email, key_name, available_tools, unavailable_tools_with_reason}`. Agent calls `whoami` on handshake; learns its tier and capabilities in one round-trip.
+
+**F-R3-DX-7 — MCP tool filtering vs blanket 403 is unaddressed. [high]**
+Fix: pick (ii) — MCP `tools/list` response is scope-filtered at handshake. Super-only tools never appear for `mcp_normal` agents. Surface them in `whoami.unavailable_tools` with reason for explainability.
+
+**F-R3-DX-8 — README delta scope undercooked at 0.5d for 7 deliverables. [medium]**
+Fix: budget T20 = 1.0d, OR scope to 3 sections + inline tool docstrings.
+
+**F-R3-DX-9 — `init` doesn't bootstrap teams in v0.1.5. [medium]**
+Fix: add `init --team=<slug>` flag that runs add_team + add_user + issue_api_key inline (~0.25d to T11). Zero-MCP-roundtrip onboarding to multi-tenant state.
+
+**F-R3-DX-10 — "Distribute key" stage has zero affordances. [medium]**
+Fix: at minimum document "out-of-band — use your team's existing secret channel" in T20. Optional: `--share-via=op` shortcut.
+
+**F-R3-DX-11 — `list_api_keys` lacks `remaining_quota_today`. [medium]**
+Fix: include `remaining_requests_today`, `remaining_tokens_today`, `quota_resets_at` in response. ~0.1d incremental.
+
+**F-R3-DX-12 — Tool naming inconsistency invites guessing. [medium]**
+`add` / `issue` / `set` / `get` / `tail` verb mix. Agent guessing "delete a team" tries `delete_team` first. Fix: pick `create_*` / `delete_*` OR `add_*` / `remove_*`. Apply uniformly. Document convention in T20.
+
+### DX Scorecard (rate / 10)
+
+| Dimension | Score | Note |
+|---|---|---|
+| Getting started TTHW | 3 | 8–18 min super_admin without mcp-config helper |
+| API/CLI naming guessability | 5 | Token-scope prefixes opaque; verbs inconsistent |
+| Error message quality | 4 | Only 429 spec'd; 401/403/404/409 missing |
+| Docs findability/completeness | 3 | T20 half a day for 7 deliverables |
+| Upgrade path safety | 6 | Schema OK; user-facing narrative missing |
+| Dev environment friction | 4 | 5 clients, 0 snippets, no helper subcommand |
+| AI-agent operability | 4 | whoami underspec'd, tool-list filter unaddressed |
+| Recovery from mistakes | 5 | Recovery exists (legacy env) but unwritten |
+| **Overall** | **4.25** | |
+
+### Verdict
+
+**APPROVE_WITH_CONCERNS** — multi-tenancy design is solid; DX surface is half-built. Findings DX-1, DX-2, DX-3 must land before T17/T20 start or v0.1.5 ships unusable to humans.
+
+### Single Most Important Fix
+
+Add `llm-gateway mcp-config --client=<claude|cline|cursor|continue|zed>` subcommand to T11 (~0.25d), AND require T11/T15 to emit a deterministic boot banner with schema version, migration result, legacy-env status, synthesized team, and a single copy-pasteable next-step command. Together they convert the operator's first 10 minutes from "edit five JSON files, guess at three opaque tokens" into "copy this line, paste, done."
+
+### Auto-Decided DX Findings Summary
+
+| # | Severity | Auto-decided? | Decision |
+|---|---|---|---|
+| F-R3-DX-1 | critical | YES — apply fix | spec exact boot banner lines in T11/T15 acceptance |
+| F-R3-DX-2 | critical | YES — apply fix | name 5 MCP clients + add `mcp-config` subcommand to T11 (+0.25d) |
+| F-R3-DX-3 | high | NO — surface at gate | `lgw_inbound_*` (readable) vs `lgw_ak_*` (compact) — taste decision |
+| F-R3-DX-4 | high | YES — apply fix | document recovery via legacy env fast-path (P5 explicit) |
+| F-R3-DX-5 | high | YES — apply fix | spec 4 missing error shapes; P1 completeness |
+| F-R3-DX-6 | high | YES — apply fix | spec `whoami` response shape; required for agent discoverability |
+| F-R3-DX-7 | high | YES — apply fix | pick (ii) tool filtering at MCP handshake; AI-native answer (P5+P6) |
+| F-R3-DX-8 | medium | YES — apply fix | bump T20 to 1.0d |
+| F-R3-DX-9 | medium | NO — surface at gate | `init --team` flag (+0.25d) — real scope expansion, user picks |
+| F-R3-DX-10 | medium | YES — apply fix | document secure handoff in T20 (zero code) |
+| F-R3-DX-11 | medium | NO — surface at gate | `remaining_quota_today` in `list_api_keys` — minor scope, user picks |
+| F-R3-DX-12 | medium | NO — surface at gate | verb-pair choice: add/remove vs create/delete — taste decision |
+
+8 auto-decided fixes; 4 surface-at-gate (DX-3, DX-9, DX-11, DX-12).
+
+---
+
+## Plan Revision 3 — Cross-phase themes (2026-05-13)
+
+These concerns surfaced INDEPENDENTLY in 2+ phases — high-confidence signals worth special attention at the gate.
+
+- **Quota correctness contradiction** — flagged by CEO (F-R3-CEO-9) AND Eng (F-R3-ENG-3). Both phases independently caught that §Quota pseudocode contradicts FM-R3-3. Auto-decided fix already converges on UPDATE-RETURNING form.
+- **`users` table as identity-without-auth** — CEO (F-R3-CEO-6, "single most important change") + DX (F-R3-DX-6 walked into same issue when defining `whoami.user_email`). Both saw the same problem from different angles. Surface at gate as User Challenge.
+- **Premise gate option C may have been wrong** — CEO (F-R3-CEO-2) is explicit. Eng's verdict REJECT + showstopper count (3 critical, 7 high) reinforces that the additive layer is more invasive than the framing suggested. Surface at gate as the load-bearing User Challenge.
+- **Two REJECT verdicts + one APPROVE_WITH_CONCERNS** — CEO REJECT, Eng REJECT, DX APPROVE_WITH_CONCERNS. The two REJECTs both name premise + scope concerns; DX names execution-surface concerns. R3 cannot proceed to T14 implementation without resolution.
+
+---
+
+## Plan Revision 3 — Decision Audit Trail (autoplan auto-decisions, R3 pass)
+
+| # | Phase | Decision | Classification | Principle | Rationale |
+|---|---|---|---|---|---|
+| AD-R3-1 | CEO-5 | Add `providers.fallback_eligible BOOLEAN DEFAULT 0` + denormalized `request_logs.provider_owner_team_id`; Q22 default = OFF | mechanical | P5 (explicit over clever) | Data-leakage prevention; default-off matches least-surprise |
+| AD-R3-2 | CEO-7 | Add honest effort comparison (B halt+redo vs C additive) to Decision Audit Trail | mechanical | P5 | Surfaces the real tradeoff numbers |
+| AD-R3-3 | CEO-9 | Replace §Quota pseudocode with FM-R3-3's atomic UPDATE-RETURNING form | mechanical | Correctness | Resolves internal contradiction |
+| AD-R3-4 | CEO-10 | Remove `--skip-migration` from FM-R3-6 (false comfort); document "no rollback in v0.1.5; downgrade requires fresh state.db" | mechanical | P5 + honesty | False rollback story removed |
+| AD-R3-5 | ENG-1 | Migration uses explicit `ALTER TABLE x ADD COLUMN y TEXT NULL REFERENCES ... ON DELETE CASCADE` + DSN pragma audit | mechanical | Correctness | Foreign keys enforced as designed |
+| AD-R3-6 | ENG-2 | Add `internal/auth/cache.go` with epoch-gated in-mem verification cache (TTL=60s, capacity-bounded) | mechanical | Critical perf fix | Cold path 80ms, warm 5µs |
+| AD-R3-7 | ENG-3 | Adopt UPDATE-RETURNING atomic single-statement form for quota reserve; two-phase reserve/commit for token caps; add 100-goroutine race test | mechanical | Correctness | Quota guarantee enforceable |
+| AD-R3-8 | ENG-5 | Widen prefix to 16 chars + `UNIQUE INDEX idx_api_keys_prefix` + regen-on-collision at issuance | mechanical | P1 completeness | Collision-free at N=1M keys |
+| AD-R3-9 | ENG-6 | `usage_counters.day` is UTC-bucketed; credit usage at stream-start | mechanical | Correctness | DST-immune |
+| AD-R3-10 | ENG-7 | Replace closure `requireRole` with declarative `aclRegistry[toolName] -> ToolACL{Scope, OwnershipResolver}` + table-driven `TestRBACMatrix` + `FuzzRequireRole` | mechanical | P5 (explicit) + security | Single chokepoint actually single |
+| AD-R3-11 | ENG-8 | Migration wrapped in `BEGIN IMMEDIATE; ... PRAGMA user_version=2; COMMIT;` + SQLite version check at startup (≥3.35) | mechanical | Correctness | Atomic schema upgrade |
+| AD-R3-12 | ENG-9 | `model_aliases` PK widened to `(alias, team_id)` via table-rename migration (CREATE _v2, INSERT, DROP, RENAME) | mechanical | Feature correctness | Per-team aliases actually work |
+| AD-R3-13 | ENG-10 | Revocation invalidates auth cache via epoch bump (subsumed by AD-R3-6) | mechanical | Security | No 60s post-revoke window |
+| AD-R3-14 | ENG-11 | `api_keys.user_id` becomes `ON DELETE RESTRICT`; remove_user with active keys returns structured error | mechanical | Audit preservation | Past attribution survives user-delete |
+| AD-R3-15 | ENG-12 | Inbound auth middleware first-line: `if !strings.HasPrefix(token,"lgw_<inbound>_") && token != legacyToken { 401 }` (defense-in-depth before DB) | mechanical | Security | Cross-scope token use rejected at HTTP layer |
+| AD-R3-16 | DX-1 | T11/T15 acceptance must include exact stdout banner (schema version, migration result, legacy detection, synthesized team, next-step command) | mechanical | P5 explicit | Silent upgrade eliminated |
+| AD-R3-17 | DX-2 | Name 5 MCP clients (Claude Desktop, Cline, Cursor, Continue, ZED); add `llm-gateway mcp-config --client=<name>` subcommand to T11 (+0.25d) | mechanical | P2 boil lakes within blast radius | Erases 10-min onboarding friction |
+| AD-R3-18 | DX-4 | Add "Recovery" subsection documenting legacy-env-fastpath as official lost-key recovery procedure | mechanical | P5 explicit | Recovery path exists, now written |
+| AD-R3-19 | DX-5 | Spec 4 missing error shapes (401 with 4 subtypes; 403; 404; 409); add error reference table to T20 | mechanical | P1 completeness | All paths have problem+cause+fix |
+| AD-R3-20 | DX-6 | Spec `whoami` response: `{scope, team_id, team_slug, user_email, key_name, available_tools, unavailable_tools_with_reason}` | mechanical | P5 + AI-native | Agent learns capabilities in one call |
+| AD-R3-21 | DX-7 | MCP `tools/list` response scope-filtered at handshake; super-only tools hidden from normal_admin agents (with `unavailable_tools` reason exposed via whoami) | mechanical | P6 AI-native + P1 | No blind 403 attempts |
+| AD-R3-22 | DX-8 | Bump T20 budget to 1.0d | mechanical | P1 completeness | 7 deliverables ≠ 0.5d |
+| AD-R3-23 | DX-10 | Document secure handoff in T20 README ("out-of-band via team's existing secret channel"); zero code | mechanical | P5 explicit | Stage-8 gap closed |
+
+23 mechanical fixes auto-decided. Each will be applied to the R3 charter once the gate-level user-challenges (CEO-1/2/3/4/6/8, ENG-4, DX-3/9/11/12) are resolved.
+
+---
+
+## Plan Revision 3 FINAL — Halt+Redo to Multi-tenant v0.1 (2026-05-13)
+
+**Status:** APPROVED via /autoplan Phase 4 user-challenge gate (option B2, then individual UC answers). The v0.1.5 versioning is collapsed; multi-tenancy folds into v0.1. Previous R3 draft + CEO/Eng/DX reviews above are retained as audit trail.
+
+### User decisions at final gate
+
+| Question | Answer | Effect |
+|---|---|---|
+| UC-R3-1 (premise) | **B halt+redo** | v0.1 is re-architected to ship as multi-tenant single product. No v0.1.5. |
+| UC-R3-2 (users table) | **A delete** | api_keys directly references team_id. `api_keys.created_for_label TEXT` carries human-readable attribution. No users table. v0.2 may re-introduce when real auth (OAuth/SSO) lands. |
+| UC-R3-3 (quota+$) | **A add $-billing** | `model_costs(provider, model, usd_per_input_1k, usd_per_output_1k)` table; `get_usage` returns tokens + `$_today`; quotas support both token and $ caps. |
+| UC-R3-4 (RBAC) | **B widen enum, implement 2** | `api_keys.scope` enum schema = `{inbound, mcp_super, mcp_admin, mcp_auditor, mcp_billing}`. v0.1 implements `inbound` + `mcp_super` + `mcp_admin` (rename of `mcp_normal` per Eng-7 declarative ACL). `mcp_auditor` + `mcp_billing` return `{type:"scope_not_implemented_in_v0.1", fix:"upgrade to v0.2 when available"}`. |
+| UC-R3-5 (legacy env) | **A permanent** | `LLM_GATEWAY_TOKEN` env stays forever as bootstrap + lost-key recovery mechanism. Print at boot when active. |
+| UC-R3-6 (competitive) | **A add subsection** | New "Competitive delta vs LiteLLM" subsection after §1 (~250 words; below). |
+| TD-1 (token format) | accept lean | Readable: `lgw_inbound_<base64>`, `lgw_admin_<base64>`, `lgw_team_<base64>` |
+| TD-2 (verbs) | accept lean | `add_*` / `remove_*` (matches existing code) |
+| TD-3 (`init --team`) | accept lean | `llm-gateway init --team=<slug>` creates team + super_admin + first key inline (+0.25d) |
+| TD-4 (`list_api_keys` quota) | accept lean | Returns `remaining_requests_today` + `remaining_tokens_today` + `quota_resets_at` (+0.1d) |
+| TD-5 (RPM bucket) | accept lean | In-memory token bucket per key; documented as "best-effort, resets on restart" |
+
+### Premise re-statement (overwrites §1 P1)
+
+P1' — **v0.1 ships multi-tenant single product.** Teams, users-via-api-keys (no separate users table), per-user API keys, MCP `super_admin` / `admin` RBAC tiers (with 2 stub tiers reserved), per-team optional providers with global fallback, token + $ quotas, RPM rate limiting. Legacy `LLM_GATEWAY_TOKEN` env is a permanent bootstrap+recovery option, NOT a deprecated path.
+
+P2–P6 unchanged from §1.
+
+### Competitive delta vs LiteLLM (per UC-R3-6, insert after §1)
+
+LiteLLM (Apache 2.0, ~3 years old, large team) is the obvious comparison: same surface (proxy multiple LLM providers), broader provider coverage, multi-tenancy in OSS. `llm-gateway` does NOT compete on provider coverage and does NOT try to.
+
+Three axes where `llm-gateway` is intentionally NOT LiteLLM:
+
+1. **AI-native MCP-only control plane.** LiteLLM operates via REST admin API + optional UI. `llm-gateway` operates via MCP stdio exclusively — every operation (issue key, set quota, view usage) is an agent-typed tool call. An operator who uses Cline or Claude Code to write code uses the SAME interface to operate the gateway. No second UI, no second mental model.
+2. **Chinese-provider-first.** LiteLLM treats GLM/DeepSeek as two of ~100 providers, with minimal awareness of their dual-protocol native support, reasoning-content field semantics, or DeepSeek's `/anthropic` base URL. `llm-gateway` is designed against these provider specifics first (see R2 spike + Q14 reasoning passthrough).
+3. **Single static Go binary, no Python runtime, no external state.** LiteLLM needs Python + PostgreSQL/Redis for production. `llm-gateway` is one binary + one SQLite file. The deployment cost difference is 30× (one file vs Python venv + DB ops + container) for the same single-team self-hosted use case.
+
+When future scope discussions arise ("should we add metric X?"), the test is: does it deepen one of these three moats? If yes, ship. If it's LiteLLM-parity, defer to v0.2 or decline.
+
+### Final schema (one migration v0 → v1 for fresh installs)
+
+```sql
+-- 1) Teams + API keys (no users table)
+CREATE TABLE teams (
+  id          TEXT PRIMARY KEY,        -- tm_<rand>
+  slug        TEXT NOT NULL UNIQUE,
+  name        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE api_keys (
+  id                  TEXT PRIMARY KEY,        -- ak_<rand>
+  team_id             TEXT NOT NULL REFERENCES teams(id) ON DELETE RESTRICT,
+  hash                TEXT NOT NULL,           -- bcrypt cost=10
+  prefix              TEXT NOT NULL,           -- first 16 chars; UNIQUE indexed
+  created_for_label   TEXT,                    -- "Cline laptop", "joy@anthropic.com CI"
+  scope               TEXT NOT NULL,           -- inbound | mcp_super | mcp_admin | mcp_auditor | mcp_billing
+  revoked_at          INTEGER,
+  expires_at          INTEGER,
+  last_used_at        INTEGER,
+  created_at          INTEGER NOT NULL,
+  CHECK (scope IN ('inbound','mcp_super','mcp_admin','mcp_auditor','mcp_billing'))
+);
+CREATE UNIQUE INDEX idx_api_keys_prefix ON api_keys(prefix);
+CREATE INDEX idx_api_keys_team ON api_keys(team_id);
+
+-- 2) Providers — team_id NULL = global default; per-team override
+CREATE TABLE providers (
+  name              TEXT PRIMARY KEY,
+  kind              TEXT NOT NULL,
+  team_id           TEXT REFERENCES teams(id) ON DELETE CASCADE,
+  openai_base_url   TEXT,
+  anthropic_base_url TEXT,
+  api_key           TEXT NOT NULL,
+  anthropic_version TEXT NOT NULL DEFAULT '2023-06-01',
+  is_default        INTEGER NOT NULL DEFAULT 0,
+  fallback_eligible INTEGER NOT NULL DEFAULT 0,   -- per CEO-F5: global serves non-owning teams only if opted-in
+  created_at        INTEGER NOT NULL,
+  CHECK (openai_base_url IS NOT NULL OR anthropic_base_url IS NOT NULL)
+);
+
+-- 3) Aliases — composite PK so multiple teams can share an alias name
+CREATE TABLE model_aliases (
+  alias          TEXT NOT NULL,
+  team_id        TEXT REFERENCES teams(id) ON DELETE CASCADE,  -- NULL = global alias
+  provider_name  TEXT NOT NULL REFERENCES providers(name) ON DELETE CASCADE,
+  upstream_model TEXT NOT NULL,
+  created_at     INTEGER NOT NULL,
+  PRIMARY KEY (alias, team_id)
+);
+
+-- 4) Request logs (no migration needed; multi-tenant fields included from day one)
+CREATE TABLE request_logs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts                INTEGER NOT NULL,
+  api_key_id        TEXT REFERENCES api_keys(id) ON DELETE SET NULL,
+  team_id           TEXT,                          -- denormalized for fast filter
+  provider_owner_team_id TEXT,                     -- per CEO-F5: disambiguate team-billed vs global-billed
+  client_model      TEXT NOT NULL,
+  resolved_model    TEXT NOT NULL,
+  provider_name     TEXT NOT NULL,
+  input_tokens      INTEGER,
+  output_tokens     INTEGER,
+  reasoning_tokens  INTEGER,
+  total_tokens      INTEGER,
+  latency_ms        INTEGER,
+  status            TEXT NOT NULL,
+  error_msg         TEXT,
+  prompt_excerpt    TEXT,
+  cost_usd_micros   INTEGER                        -- usage_$ * 1_000_000 for integer arithmetic
+);
+CREATE INDEX idx_logs_ts ON request_logs(ts DESC);
+CREATE INDEX idx_logs_team ON request_logs(team_id);
+CREATE INDEX idx_logs_key ON request_logs(api_key_id);
+
+-- 5) Usage counters (atomic UPSERT in hot path; UTC days only per ENG-F6)
+CREATE TABLE usage_counters (
+  api_key_id       TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  day_utc          INTEGER NOT NULL,        -- (UnixMilli / 86_400_000) using UTC time
+  request_count    INTEGER NOT NULL DEFAULT 0,
+  input_tokens     INTEGER NOT NULL DEFAULT 0,
+  output_tokens    INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd_micros  INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (api_key_id, day_utc)
+);
+
+-- 6) Quotas — both token caps AND $ caps (per UC-R3-3)
+CREATE TABLE quotas (
+  scope_kind     TEXT NOT NULL,             -- "team" | "key"
+  scope_id       TEXT NOT NULL,
+  window         TEXT NOT NULL,             -- "month" | "day" | "minute"
+  max_requests   INTEGER,
+  max_tokens     INTEGER,
+  max_usd_micros INTEGER,                   -- $ cap (token-cap * usd-per-token)
+  PRIMARY KEY (scope_kind, scope_id, window),
+  CHECK (scope_kind IN ('team','key')),
+  CHECK (window IN ('month','day','minute'))
+);
+
+-- 7) Model costs — for $ accounting (per UC-R3-3)
+CREATE TABLE model_costs (
+  provider              TEXT NOT NULL,
+  model                 TEXT NOT NULL,
+  usd_per_input_1k      REAL NOT NULL,      -- e.g., 0.00014 for deepseek-v4-flash input
+  usd_per_output_1k     REAL NOT NULL,
+  usd_per_reasoning_1k  REAL,               -- NULL for non-reasoning models
+  effective_from        INTEGER NOT NULL,
+  PRIMARY KEY (provider, model, effective_from)
+);
+```
+
+### Final v0.1 task list (halt+redo: replaces §4 task table)
+
+| # | Task | Status | Effort | Notes |
+|---|---|---|---|---|
+| T0 | Wizard-of-Oz P6 validation | DONE | | already shipped |
+| T1 | HTTP server + bearer auth middleware | DONE | | bearer auth becomes API key lookup in T1.5 |
+| T1.5 | IR types (Anthropic-aligned superset) | DONE | | unchanged |
+| T2a | DeepSeek passthrough adapter | DONE | | unchanged |
+| T4 | SQLite store (single migration v0→v1 with FINAL schema above) | **NEEDS REWORK** | 1.5d | re-do schema migration to include all tables; existing v1 state.db is dev-only, re-init OK |
+| T5 | Router team-scoping + per-team provider fallback | **NEEDS REWORK** | 0.75d | extends existing router with team_id predicate + fallback_eligible check |
+| T6 | Inbound auth path: API key lookup + cache + legacy fast-path | **NEW (folds in T15)** | 1d | replaces simple bearer; `internal/auth/cache.go` epoch-gated |
+| T7 | MCP server stdio + declarative ACL registry (`requireRole`) | **IN PROGRESS, RE-SCOPE** | 1.5d | currently mid-impl; halt + redo to include ACL chokepoint from start |
+| T8 | MCP tools: provider/alias (team-scoped) — `add_provider`/`set_model_alias`/`list_providers`/`list_model_aliases`/`remove_provider`/`remove_alias` | NEW | 0.75d | all team-scoped from day one |
+| T9 | MCP tools: tenancy — `add_team`/`remove_team`/`list_teams`/`issue_api_key`/`list_api_keys`/`revoke_api_key`/`set_quota`/`get_usage`/`tail_logs`/`get_request`/`whoami` | NEW | 1.5d | super+admin scopes; auditor/billing return `scope_not_implemented_in_v0.1` |
+| T10 | Quota enforcement middleware (atomic UPDATE-RETURNING) + in-mem RPM bucket + reserve/commit token quota | NEW | 1d | per ENG-F3 atomic single-statement form |
+| T11 | init subcommand + `--team=<slug>` flag + boot banner + `mcp-config --client=<n>` subcommand | **NEEDS REWORK** | 1d | adds `--team` flag (TD-3) + `mcp-config` subcommand (DX-F2) + deterministic boot banner (DX-F1) |
+| T11.5 | model_costs seed data for DeepSeek + GLM published prices | NEW | 0.25d | one CSV import; values from vendor docs |
+| T12 | goreleaser + GitHub Actions CI | unchanged | 0.5d | |
+| T13 | README v0.1 with 5 MCP client snippets + onboarding flow + error reference + recovery procedure | **NEEDS REWORK** | 1d | per DX-F8 bumped to 1d |
+| **v0.1 total** | | | **~12 工程日** | (vs original 11.5; ~ +6.5d from R3 absorption, ~ -5d gained by NOT writing v1→v2 migration) |
+
+Tasks **bold-marked NEEDS REWORK** require pausing current code where applicable and re-architecting. T0/T1/T1.5/T2a already-shipped code stays as-is (it doesn't conflict with the new schema; just gets extended).
+
+### Auto-decided patches (23 mechanical fixes, applied to FINAL)
+
+All 23 fixes from the Decision Audit Trail above are now incorporated into FINAL:
+- AD-R3-1 → providers.fallback_eligible included in final schema
+- AD-R3-2 → effort table above shows halt+redo delta
+- AD-R3-3 → quota middleware uses UPDATE-RETURNING (T10)
+- AD-R3-4 → migration is one-shot v0→v1, no rollback story needed
+- AD-R3-5..8 → all schema/index choices in FINAL match
+- AD-R3-9 → usage_counters.day_utc explicitly UTC
+- AD-R3-10 → declarative ACL registry is the chokepoint (T7)
+- AD-R3-11 → migration in single BEGIN IMMEDIATE txn (T4)
+- AD-R3-12 → model_aliases PK is composite (alias, team_id) in FINAL schema
+- AD-R3-13 → epoch-gated cache (T6)
+- AD-R3-14 → api_keys.team_id ON DELETE RESTRICT (FINAL schema)
+- AD-R3-15 → inbound auth prefix-scope precheck (T6)
+- AD-R3-16 → boot banner spec in T11 acceptance
+- AD-R3-17 → `mcp-config` subcommand in T11
+- AD-R3-18 → recovery via legacy env documented in T13 README
+- AD-R3-19 → 4 missing error shapes spec'd; error reference in T13
+- AD-R3-20 → `whoami` response shape in T9 spec
+- AD-R3-21 → MCP tools/list scope-filtered at handshake (T7)
+- AD-R3-22 → T13 budget = 1d
+- AD-R3-23 → secure handoff documented in T13
+
+### Open Questions consolidated (R3 + carried-over R2)
+
+Q13 (GLM Anthropic endpoint), Q14 (reasoning passthrough), Q15 (signature field), Q16 (SSE byte fidelity), Q17 (token format = lgw_inbound_/lgw_admin_/lgw_team_ per TD-1), Q18 (bcrypt cost=10), Q19 (UTC calendar day), Q20 (synchronous usage UPSERT), Q21 (revocation: in-flight finishes), Q22 (per-team provider visibility: strict isolation; fallback_eligible default OFF per CEO-F5), Q23 (`add_team` with no auto-user; first key issued via `init --team` flag or `issue_api_key`), Q24 (existing single-provider config stays global; no auto-migration to a team).
+
+### What this revision LEAVES OPEN (v0.2+)
+
+- Real auth (OAuth/SSO/passwords) → v0.2 brings back `users` table with real auth meaning
+- HTTP/SSE MCP transport → v0.2 (TODOS.md UC-4 unchanged)
+- Docker container → v0.2 unchanged
+- Encryption-at-rest for `providers.api_key` (F-DX-09) → v0.2 unchanged
+- Admin action audit log (`admin_audit` table) → v0.1.6 if demand emerges
+- SQLite-backed RPM bucket persistence → v0.2 if real abuse observed
+- `mcp_auditor` + `mcp_billing` scope implementations → v0.2
+
+### Next concrete step
+
+1. **Commit this FINAL revision to git** (commit message: `plan: REVISION-3 FINAL — halt+redo to multi-tenant v0.1`).
+2. **Pause Task 7 in-progress code.** The MCP server scaffolding already started will become the foundation for T7's declarative ACL registry — none of it is wasted, but it needs to be re-architected to include the ACL chokepoint from start.
+3. **Re-do Task 4** (store schema) FIRST per the new dependency order. This is the foundation everything else builds on. ~1.5d.
+4. Continue T5/T6/T7 per the new task table.
+
+---
+
+<!-- /autoplan restore point: /Users/panda/.gstack/projects/llm-gateway/main-autoplan-restore-20260513-204435.md (R3 pass; original plan preserved verbatim there) -->
