@@ -198,6 +198,14 @@ The gateway exposes a stdio MCP server (`llm-gateway mcp-serve`). All tools requ
 | `list_quotas` | List all quota rules | `mcp_admin` |
 | `list_request_logs` | Query request logs (filterable by team or key) | `mcp_admin` |
 
+**Team-scoped model aliases**
+
+| Tool | Description | Min scope |
+|------|-------------|-----------|
+| `set_team_model_alias` | Map an alias to a provider + model for a specific team (overrides global) | `mcp_admin` |
+| `delete_team_model_alias` | Remove a team-scoped alias (global alias becomes visible again) | `mcp_admin` |
+| `list_team_model_aliases` | List all team-scoped aliases for a team | `mcp_admin` |
+
 ## Environment variables
 
 | Variable | Default | Description |
