@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	authpkg "github.com/panda/llm-gateway/internal/auth"
 	"github.com/panda/llm-gateway/internal/provider"
 	"github.com/panda/llm-gateway/internal/router"
 	"github.com/panda/llm-gateway/internal/store"
@@ -35,9 +36,20 @@ type Server struct {
 
 // NewServer wires auth + (optional) store-driven routing. Pass nil for
 // store to keep stub-mode handlers (offline dev).
+//
+// When store is non-nil, NewAuthWithStore is used so that lgw_-prefixed API
+// keys are accepted alongside the legacy token (T6 inbound auth path). The
+// KeyCache uses a 60-second TTL matching plan R3 FINAL.
 func NewServer(token string, s *store.Store) *Server {
+	var a *Auth
+	if s != nil {
+		cache := authpkg.NewKeyCache(60 * time.Second)
+		a = NewAuthWithStore(token, s, cache)
+	} else {
+		a = NewAuth(token)
+	}
 	srv := &Server{
-		auth:  NewAuth(token),
+		auth:  a,
 		store: s,
 		mux:   http.NewServeMux(),
 	}
