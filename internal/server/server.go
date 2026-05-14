@@ -60,6 +60,7 @@ func NewServer(token string, s *store.Store) *Server {
 	}
 	srv.mux.HandleFunc("/v1/chat/completions", srv.dispatchOpenAI)
 	srv.mux.HandleFunc("/v1/messages", srv.dispatchAnthropic)
+	srv.mux.HandleFunc("/v1/models", srv.handleModels)
 	return srv
 }
 
