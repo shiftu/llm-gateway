@@ -40,10 +40,19 @@ type Store struct {
 
 // Open accepts a filesystem path or ":memory:". Applies migrations on
 // success. Caller is responsible for Close.
+//
+// For ":memory:" we pin MaxOpenConns=1 because modernc.org/sqlite (like
+// every other SQLite binding) gives each pooled connection its OWN in-mem
+// database — so a second concurrent connection would observe an empty
+// schema. Production (file-backed WAL) uses the default pool and relies on
+// busy_timeout + WAL for concurrent writers.
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", buildDSN(path))
 	if err != nil {
 		return nil, err
+	}
+	if path == ":memory:" {
+		db.SetMaxOpenConns(1)
 	}
 	if err := db.Ping(); err != nil {
 		db.Close()
