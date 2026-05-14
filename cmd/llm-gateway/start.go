@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/panda/llm-gateway/internal/server"
 	"github.com/panda/llm-gateway/internal/store"
@@ -50,6 +51,10 @@ func runStart() int {
 	}
 	if err := seedProviderFromEnv(st); err != nil {
 		fmt.Fprintf(os.Stderr, "could not seed provider from env: %v\n", err)
+		return 1
+	}
+	if err := seedModelCosts(st); err != nil {
+		fmt.Fprintf(os.Stderr, "could not seed model costs: %v\n", err)
 		return 1
 	}
 	srv := server.NewServer(token, st)
@@ -161,4 +166,43 @@ func seedProviderFromEnv(st *store.Store) error {
 		return st.SetDefaultProvider(name)
 	}
 	return err
+}
+
+// seedModelCosts upserts published pricing for DeepSeek and GLM models so that
+// cost tracking works out-of-the-box. Uses SetModelCost's ON CONFLICT DO UPDATE
+// so repeated starts are idempotent. Prices reflect 2025-05 rate cards:
+//
+//	DeepSeek V4 Flash (R1-based reasoning): $0.55/$2.19 per M tokens in/out
+//	DeepSeek V4 Pro  (V3 chat):             $0.27/$1.10 per M tokens in/out
+//	GLM-4-Plus       (Zhipu):               ¥0.05/1k ≈ $0.007/1k in/out
+func seedModelCosts(st *store.Store) error {
+	if st == nil {
+		return nil
+	}
+	eff := time.Date(2025, 5, 1, 0, 0, 0, 0, time.UTC)
+	r219 := 0.00219 // deepseek-v4-flash reasoning token price (same as output)
+
+	costs := []store.ModelCost{
+		{
+			Provider: "deepseek", Model: "deepseek-v4-flash",
+			USDPerInput1k: 0.00055, USDPerOutput1k: 0.00219,
+			USDPerReasoning1k: &r219, EffectiveFrom: eff,
+		},
+		{
+			Provider: "deepseek", Model: "deepseek-v4-pro",
+			USDPerInput1k: 0.00027, USDPerOutput1k: 0.00110,
+			EffectiveFrom: eff,
+		},
+		{
+			Provider: "glm-prod", Model: "glm-4-plus",
+			USDPerInput1k: 0.007, USDPerOutput1k: 0.007,
+			EffectiveFrom: eff,
+		},
+	}
+	for _, c := range costs {
+		if err := st.SetModelCost(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
