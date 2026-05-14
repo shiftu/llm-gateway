@@ -43,6 +43,10 @@ var registry = map[string]string{
 	"get_quota":       "mcp_admin",
 	"list_quotas":     "mcp_admin",
 	"list_request_logs": "mcp_admin",
+
+	"set_team_model_alias":    "mcp_admin",
+	"delete_team_model_alias": "mcp_admin",
+	"list_team_model_aliases": "mcp_admin",
 }
 
 var (

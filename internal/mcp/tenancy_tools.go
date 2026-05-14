@@ -12,8 +12,8 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-// RegisterTenancyTools adds the 8 team + API-key + quota management tools to s.
-// Team/key issuance require mcp_super; list/get require mcp_admin.
+// RegisterTenancyTools adds the 11 team + API-key + quota + team-alias tools to s.
+// Team/key issuance require mcp_super; list/get/alias ops require mcp_admin.
 func RegisterTenancyTools(s *mcpserver.MCPServer, st *store.Store) {
 	s.AddTool(
 		mcplib.NewTool("add_team",
@@ -89,6 +89,31 @@ func RegisterTenancyTools(s *mcpserver.MCPServer, st *store.Store) {
 			mcplib.WithNumber("limit", mcplib.Description("Max rows to return (1–200, default 50)")),
 		),
 		listRequestLogsHandler(st),
+	)
+	s.AddTool(
+		mcplib.NewTool("set_team_model_alias",
+			mcplib.WithDescription("Create or replace a team-scoped model alias. Overrides a global alias of the same name for this team only."),
+			mcplib.WithString("team_slug", mcplib.Required(), mcplib.Description("Team slug")),
+			mcplib.WithString("alias", mcplib.Required(), mcplib.Description("Alias name visible to this team's inbound requests, e.g. 'fast'")),
+			mcplib.WithString("provider_name", mcplib.Required(), mcplib.Description("Registered provider name to route to")),
+			mcplib.WithString("upstream_model", mcplib.Required(), mcplib.Description("Upstream model name sent to the provider")),
+		),
+		setTeamModelAliasHandler(st),
+	)
+	s.AddTool(
+		mcplib.NewTool("delete_team_model_alias",
+			mcplib.WithDescription("Remove a team-scoped model alias. The global alias with the same name becomes visible again if one exists."),
+			mcplib.WithString("team_slug", mcplib.Required(), mcplib.Description("Team slug")),
+			mcplib.WithString("alias", mcplib.Required(), mcplib.Description("Alias name to remove")),
+		),
+		deleteTeamModelAliasHandler(st),
+	)
+	s.AddTool(
+		mcplib.NewTool("list_team_model_aliases",
+			mcplib.WithDescription("List all team-scoped model aliases for a team (does not include global aliases)."),
+			mcplib.WithString("team_slug", mcplib.Required(), mcplib.Description("Team slug")),
+		),
+		listTeamModelAliasesHandler(st),
 	)
 }
 
@@ -419,6 +444,104 @@ func listRequestLogsHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 				PromptExcerpt:    l.PromptExcerpt,
 				APIKeyID:         l.APIKeyID,
 				TeamID:           l.TeamID,
+			}
+		}
+		b, _ := json.Marshal(out)
+		return mcplib.NewToolResultText(string(b)), nil
+	}
+}
+
+func setTeamModelAliasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "set_team_model_alias"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		teamSlug := req.GetString("team_slug", "")
+		alias := req.GetString("alias", "")
+		providerName := req.GetString("provider_name", "")
+		upstreamModel := req.GetString("upstream_model", "")
+		if teamSlug == "" || alias == "" || providerName == "" || upstreamModel == "" {
+			return mcplib.NewToolResultError("required: team_slug, alias, provider_name, upstream_model"), nil
+		}
+		team, err := st.GetTeamBySlug(teamSlug)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return mcplib.NewToolResultError("team not found: " + teamSlug), nil
+			}
+			return mcplib.NewToolResultError("set_team_model_alias: lookup team: " + err.Error()), nil
+		}
+		if err := st.SetAliasForTeam(alias, team.ID, providerName, upstreamModel); err != nil {
+			return mcplib.NewToolResultError("set_team_model_alias failed: " + err.Error()), nil
+		}
+		out, _ := json.Marshal(map[string]any{
+			"ok": true, "team_slug": teamSlug, "alias": alias,
+			"provider_name": providerName, "upstream_model": upstreamModel,
+		})
+		return mcplib.NewToolResultText(string(out)), nil
+	}
+}
+
+func deleteTeamModelAliasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "delete_team_model_alias"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		teamSlug := req.GetString("team_slug", "")
+		alias := req.GetString("alias", "")
+		if teamSlug == "" || alias == "" {
+			return mcplib.NewToolResultError("required: team_slug, alias"), nil
+		}
+		team, err := st.GetTeamBySlug(teamSlug)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return mcplib.NewToolResultError("team not found: " + teamSlug), nil
+			}
+			return mcplib.NewToolResultError("delete_team_model_alias: lookup team: " + err.Error()), nil
+		}
+		if err := st.RemoveAliasForTeam(alias, team.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return mcplib.NewToolResultError(fmt.Sprintf("team alias %q not found for team %q", alias, teamSlug)), nil
+			}
+			return mcplib.NewToolResultError("delete_team_model_alias failed: " + err.Error()), nil
+		}
+		out, _ := json.Marshal(map[string]any{"ok": true, "team_slug": teamSlug, "alias": alias})
+		return mcplib.NewToolResultText(string(out)), nil
+	}
+}
+
+func listTeamModelAliasesHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "list_team_model_aliases"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		teamSlug := req.GetString("team_slug", "")
+		if teamSlug == "" {
+			return mcplib.NewToolResultError("required: team_slug"), nil
+		}
+		team, err := st.GetTeamBySlug(teamSlug)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return mcplib.NewToolResultError("team not found: " + teamSlug), nil
+			}
+			return mcplib.NewToolResultError("list_team_model_aliases: lookup team: " + err.Error()), nil
+		}
+		aliases, err := st.ListAliasesForTeam(team.ID)
+		if err != nil {
+			return mcplib.NewToolResultError("list_team_model_aliases failed: " + err.Error()), nil
+		}
+		type row struct {
+			Alias         string `json:"alias"`
+			ProviderName  string `json:"provider_name"`
+			UpstreamModel string `json:"upstream_model"`
+			CreatedAt     string `json:"created_at"`
+		}
+		out := make([]row, len(aliases))
+		for i, a := range aliases {
+			out[i] = row{
+				Alias:         a.Alias,
+				ProviderName:  a.ProviderName,
+				UpstreamModel: a.UpstreamModel,
+				CreatedAt:     a.CreatedAt.UTC().Format(time.RFC3339),
 			}
 		}
 		b, _ := json.Marshal(out)
