@@ -119,7 +119,13 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		return
 	}
 
-	route, err := s.router.Resolve(clientModel)
+	ak, hasKey := authpkg.APIKeyFromContext(r.Context())
+	teamID := ""
+	if hasKey {
+		teamID = ak.TeamID
+	}
+
+	route, err := s.router.ResolveForTeam(clientModel, teamID)
 	if err != nil {
 		writeStructuredError(w, http.StatusNotFound, "no_route", err.Error(),
 			"register a model alias via MCP set_model_alias, or set a default provider via set_default_provider")
@@ -148,12 +154,19 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 	started := time.Now()
 	resp, dispatchErr := dispatchProtocol(r.Context(), p, protocol, bodyToSend)
 	if dispatchErr != nil {
-		s.logRequest(store.RequestLog{
-			ClientModel: clientModel, ResolvedModel: route.UpstreamModel,
-			ProviderName: route.Provider.Name, Status: "upstream_error",
-			LatencyMs: int(time.Since(started).Milliseconds()),
-			ErrorMsg:  dispatchErr.Error(),
-		})
+		rl := store.RequestLog{
+			ClientModel:  clientModel,
+			ResolvedModel: route.UpstreamModel,
+			ProviderName: route.Provider.Name,
+			Status:       "upstream_error",
+			LatencyMs:    int(time.Since(started).Milliseconds()),
+			ErrorMsg:     dispatchErr.Error(),
+		}
+		if hasKey {
+			rl.APIKeyID = ak.ID
+			rl.TeamID = ak.TeamID
+		}
+		s.logRequest(rl)
 		if errors.Is(dispatchErr, provider.ErrProtocolUnsupported) {
 			writeStructuredError(w, http.StatusNotImplemented, "cross_protocol_not_supported",
 				fmt.Sprintf("provider %q has no %s base_url; IR translation not yet implemented", p.Name, protocol),
@@ -164,13 +177,30 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		return
 	}
 	defer resp.Body.Close()
-	pipeUpstream(w, resp)
 
-	s.logRequest(store.RequestLog{
-		ClientModel: clientModel, ResolvedModel: route.UpstreamModel,
-		ProviderName: route.Provider.Name, Status: "ok",
-		LatencyMs: int(time.Since(started).Milliseconds()),
-	})
+	u := pipeAndCaptureUsage(w, resp, protocol)
+
+	rl := store.RequestLog{
+		ClientModel:      clientModel,
+		ResolvedModel:    route.UpstreamModel,
+		ProviderName:     route.Provider.Name,
+		Status:           "ok",
+		LatencyMs:        int(time.Since(started).Milliseconds()),
+		PromptTokens:     u.InputTokens,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      u.InputTokens + u.OutputTokens + u.ReasoningTokens,
+	}
+	if hasKey {
+		rl.APIKeyID = ak.ID
+		rl.TeamID = ak.TeamID
+		if s.store != nil {
+			dayUTC := truncateToDay(time.Now().UTC())
+			costMicros := calcCostMicros(s.store, route.Provider.Name, route.UpstreamModel, u)
+			_ = s.store.CommitUsage(ak.ID, dayUTC,
+				int64(u.InputTokens), int64(u.OutputTokens), int64(u.ReasoningTokens), costMicros)
+		}
+	}
+	s.logRequest(rl)
 }
 
 func dispatchProtocol(ctx context.Context, p *provider.Provider, protocol string, body io.Reader) (*http.Response, error) {
@@ -254,6 +284,29 @@ func pipeUpstream(w http.ResponseWriter, resp *http.Response) {
 		return
 	}
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// pipeAndCaptureUsage pipes the upstream response to the client while
+// intercepting the body to extract token-usage counts. For streaming responses
+// an io.TeeReader accumulates SSE bytes as they flow to the client. For
+// blocking responses the body is read once, forwarded, then parsed.
+// Caller retains responsibility for resp.Body.Close via defer.
+func pipeAndCaptureUsage(w http.ResponseWriter, resp *http.Response, protocol string) capturedUsage {
+	for _, h := range []string{"Content-Type", "Cache-Control"} {
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		var buf bytes.Buffer
+		flushAndCopy(w, io.TeeReader(resp.Body, &buf))
+		return parseSSEUsage(buf.Bytes(), protocol)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_, _ = w.Write(body)
+	return parseBlockingUsage(body, protocol)
 }
 
 func flushAndCopy(w http.ResponseWriter, r io.Reader) {
