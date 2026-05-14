@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	schemaVersion           = 1
+	schemaVersion           = 2
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -107,28 +107,162 @@ var migrations = []string{
 	CREATE INDEX idx_logs_ts ON request_logs(ts DESC);
 	CREATE INDEX idx_logs_provider ON request_logs(provider_name);
 	`,
+	// v1 -> v2: multi-tenancy (Plan R3 FINAL — halt+redo to multi-tenant v0.1)
+	// Adds: teams, api_keys, usage_counters, quotas, model_costs.
+	// Extends: providers (team_id, fallback_eligible) + request_logs
+	//   (api_key_id, team_id, provider_owner_team_id, cost_usd_micros,
+	//    input_tokens, output_tokens, reasoning_tokens).
+	// Recreates: model_aliases with composite PK (alias, team_id) — SQLite
+	//   cannot ALTER PK, so this uses CREATE _v2 → copy → DROP → RENAME
+	//   per Eng review F-R3-ENG-9.
+	`
+	CREATE TABLE teams (
+	  id          TEXT PRIMARY KEY,
+	  slug        TEXT NOT NULL UNIQUE,
+	  name        TEXT NOT NULL,
+	  created_at  INTEGER NOT NULL
+	);
+
+	CREATE TABLE api_keys (
+	  id                 TEXT PRIMARY KEY,
+	  team_id            TEXT NOT NULL REFERENCES teams(id) ON DELETE RESTRICT,
+	  hash               TEXT NOT NULL,
+	  prefix             TEXT NOT NULL,
+	  created_for_label  TEXT,
+	  scope              TEXT NOT NULL,
+	  revoked_at         INTEGER,
+	  expires_at         INTEGER,
+	  last_used_at       INTEGER,
+	  created_at         INTEGER NOT NULL,
+	  CHECK (scope IN ('inbound','mcp_super','mcp_admin','mcp_auditor','mcp_billing'))
+	);
+	CREATE UNIQUE INDEX idx_api_keys_prefix ON api_keys(prefix);
+	CREATE INDEX idx_api_keys_team ON api_keys(team_id);
+
+	CREATE TABLE usage_counters (
+	  api_key_id       TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+	  day_utc          INTEGER NOT NULL,
+	  request_count    INTEGER NOT NULL DEFAULT 0,
+	  input_tokens     INTEGER NOT NULL DEFAULT 0,
+	  output_tokens    INTEGER NOT NULL DEFAULT 0,
+	  reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+	  cost_usd_micros  INTEGER NOT NULL DEFAULT 0,
+	  PRIMARY KEY (api_key_id, day_utc)
+	);
+
+	CREATE TABLE quotas (
+	  scope_kind     TEXT NOT NULL,
+	  scope_id       TEXT NOT NULL,
+	  window         TEXT NOT NULL,
+	  max_requests   INTEGER,
+	  max_tokens     INTEGER,
+	  max_usd_micros INTEGER,
+	  PRIMARY KEY (scope_kind, scope_id, window),
+	  CHECK (scope_kind IN ('team','key')),
+	  CHECK (window IN ('month','day','minute'))
+	);
+
+	CREATE TABLE model_costs (
+	  provider              TEXT NOT NULL,
+	  model                 TEXT NOT NULL,
+	  usd_per_input_1k      REAL NOT NULL,
+	  usd_per_output_1k     REAL NOT NULL,
+	  usd_per_reasoning_1k  REAL,
+	  effective_from        INTEGER NOT NULL,
+	  PRIMARY KEY (provider, model, effective_from)
+	);
+
+	ALTER TABLE providers ADD COLUMN team_id TEXT REFERENCES teams(id) ON DELETE CASCADE;
+	ALTER TABLE providers ADD COLUMN fallback_eligible INTEGER NOT NULL DEFAULT 0;
+
+	ALTER TABLE request_logs ADD COLUMN api_key_id TEXT REFERENCES api_keys(id) ON DELETE SET NULL;
+	ALTER TABLE request_logs ADD COLUMN team_id TEXT;
+	ALTER TABLE request_logs ADD COLUMN provider_owner_team_id TEXT;
+	ALTER TABLE request_logs ADD COLUMN cost_usd_micros INTEGER;
+	ALTER TABLE request_logs ADD COLUMN input_tokens INTEGER;
+	ALTER TABLE request_logs ADD COLUMN output_tokens INTEGER;
+	ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER;
+
+	CREATE INDEX idx_logs_team ON request_logs(team_id);
+	CREATE INDEX idx_logs_key ON request_logs(api_key_id);
+
+	CREATE TABLE model_aliases_v2 (
+	  alias          TEXT NOT NULL,
+	  team_id        TEXT REFERENCES teams(id) ON DELETE CASCADE,
+	  provider_name  TEXT NOT NULL REFERENCES providers(name) ON DELETE CASCADE,
+	  upstream_model TEXT NOT NULL,
+	  created_at     INTEGER NOT NULL,
+	  PRIMARY KEY (alias, team_id)
+	);
+	INSERT INTO model_aliases_v2 (alias, team_id, provider_name, upstream_model, created_at)
+	  SELECT alias, NULL, provider_name, upstream_model, created_at FROM model_aliases;
+	DROP TABLE model_aliases;
+	ALTER TABLE model_aliases_v2 RENAME TO model_aliases;
+	CREATE UNIQUE INDEX idx_aliases_global_alias ON model_aliases(alias) WHERE team_id IS NULL
+	`,
 }
 
+// SQLite has a long-standing quirk: NULL columns in a PRIMARY KEY are
+// treated as distinct (against the SQL standard), so PRIMARY KEY (alias,
+// team_id) does NOT prevent two rows with (alias='x', team_id=NULL). The
+// partial UNIQUE INDEX above closes that gap for global aliases. Team-
+// scoped rows (team_id IS NOT NULL) are covered by the composite PK
+// directly. SetAlias's upsert uses ON CONFLICT(alias) WHERE team_id IS
+// NULL to target the partial index when inserting a global alias.
+
+// applyMigrations brings the DB schema up to schemaVersion in a single
+// transaction (Eng review F-R3-ENG-8). A failure mid-migration rolls back
+// cleanly so the schema never lands in a partial v(n) → v(n+1) state.
+// Idempotent: if user_version already equals schemaVersion the function
+// returns without opening a txn (avoids spurious BEGIN/COMMIT pairs in
+// tests that re-invoke applyMigrations on an already-migrated DB).
 func applyMigrations(db *sql.DB) error {
 	var v int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
 	}
+	if v >= schemaVersion {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin migration txn: %w", err)
+	}
+	defer tx.Rollback()
+
 	for i := v; i < schemaVersion; i++ {
 		for _, stmt := range strings.Split(migrations[i], ";") {
 			s := strings.TrimSpace(stmt)
 			if s == "" {
 				continue
 			}
-			if _, err := db.Exec(s); err != nil {
-				return fmt.Errorf("migration v%d→v%d: %w", i, i+1, err)
+			if _, err := tx.Exec(s); err != nil {
+				return fmt.Errorf("migration v%d→v%d failed at stmt %q: %w",
+					i, i+1, firstLine(s), err)
 			}
 		}
 	}
-	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
-		return err
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+		return fmt.Errorf("bump user_version: %w", err)
 	}
-	return nil
+	return tx.Commit()
+}
+
+// firstLine returns the first non-empty line of s — used in migration
+// error messages so the failing statement is identifiable without dumping
+// the entire CREATE/ALTER block.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			if len(trimmed) > 80 {
+				return trimmed[:77] + "..."
+			}
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // Provider mirrors a row in the providers table. v0.1 lets the caller pass
@@ -243,13 +377,17 @@ type Alias struct {
 	CreatedAt     time.Time
 }
 
-// SetAlias is upsert — re-setting an existing alias overwrites its provider
-// and upstream model. Returns FK error if provider_name doesn't exist.
+// SetAlias is upsert for GLOBAL aliases (team_id IS NULL). Re-setting an
+// existing alias overwrites its provider and upstream model. Returns FK
+// error if provider_name doesn't exist. Team-scoped aliases land via the
+// future SetAliasForTeam(alias, teamID, ...) method introduced in T9 MCP
+// tools — keeping the v1-shape signature here for backward compat with
+// router + tests that predate multi-tenancy.
 func (s *Store) SetAlias(alias, providerName, upstreamModel string) error {
 	now := time.Now().UnixMilli()
-	_, err := s.db.Exec(`INSERT INTO model_aliases (alias, provider_name, upstream_model, created_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(alias) DO UPDATE SET
+	_, err := s.db.Exec(`INSERT INTO model_aliases (alias, team_id, provider_name, upstream_model, created_at)
+		VALUES (?, NULL, ?, ?, ?)
+		ON CONFLICT(alias) WHERE team_id IS NULL DO UPDATE SET
 			provider_name = excluded.provider_name,
 			upstream_model = excluded.upstream_model`,
 		alias, providerName, upstreamModel, now)
