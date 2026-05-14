@@ -77,6 +77,19 @@ func (s *Store) CommitUsage(apiKeyID string, dayUTC int64, input, output, reason
 	return err
 }
 
+// SumDayRequests returns the total request_count for a key over a range of
+// day_utc values [fromDayUTC, toDayUTC). Used by the quota middleware for
+// month-window best-effort checks. Returns 0 if no rows exist (not ErrNotFound).
+func (s *Store) SumDayRequests(apiKeyID string, fromDayUTC, toDayUTC int64) (int64, error) {
+	var total int64
+	err := s.db.QueryRow(
+		`SELECT COALESCE(SUM(request_count), 0) FROM usage_counters
+		 WHERE api_key_id = ? AND day_utc >= ? AND day_utc < ?`,
+		apiKeyID, fromDayUTC, toDayUTC,
+	).Scan(&total)
+	return total, err
+}
+
 func (s *Store) GetUsageCounter(apiKeyID string, dayUTC int64) (UsageCounter, error) {
 	row := s.db.QueryRow(
 		`SELECT api_key_id, day_utc, request_count, input_tokens, output_tokens, reasoning_tokens, cost_usd_micros

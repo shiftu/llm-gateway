@@ -31,6 +31,7 @@ type Server struct {
 	auth   *Auth
 	store  *store.Store
 	router *router.Router
+	quota  *QuotaMW
 	mux    *http.ServeMux
 }
 
@@ -55,6 +56,7 @@ func NewServer(token string, s *store.Store) *Server {
 	}
 	if s != nil {
 		srv.router = router.New(s)
+		srv.quota = NewQuotaMW(s)
 	}
 	srv.mux.HandleFunc("/v1/chat/completions", srv.dispatchOpenAI)
 	srv.mux.HandleFunc("/v1/messages", srv.dispatchAnthropic)
@@ -62,7 +64,11 @@ func NewServer(token string, s *store.Store) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.auth.Middleware(s.mux)
+	var h http.Handler = s.mux
+	if s.quota != nil {
+		h = s.quota.Middleware(h)
+	}
+	return s.auth.Middleware(h)
 }
 
 const (
