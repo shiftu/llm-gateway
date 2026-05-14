@@ -2,6 +2,7 @@
 node_modules/
 dist/
 build/
+bin/
 .env
 .env.local
 *.log

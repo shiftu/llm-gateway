@@ -5,7 +5,8 @@ import (
 	"os"
 )
 
-const version = "0.0.1-dev"
+// version is overridden at release time via -ldflags "-X main.version=<tag>".
+var version = "0.0.1-dev"
 
 func main() {
 	os.Exit(run(os.Args[1:]))
