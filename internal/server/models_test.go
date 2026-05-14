@@ -77,8 +77,8 @@ func TestHandleModels_StubMode_EmptyList(t *testing.T) {
 
 func TestHandleModels_GlobalAliases(t *testing.T) {
 	st := openModelsStore(t)
-	_ = st.SetAlias("fast", "deepseek", "deepseek-v4-flash")
-	_ = st.SetAlias("smart", "glm", "glm-4-plus")
+	_ = st.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil)
+	_ = st.SetAlias("smart", "glm", "glm-4-plus", nil, nil)
 
 	srv := NewServer("tok", st)
 	resp := getModels(t, srv, nil)
@@ -97,7 +97,7 @@ func TestHandleModels_GlobalAliases(t *testing.T) {
 
 func TestHandleModels_ModelEntryShape(t *testing.T) {
 	st := openModelsStore(t)
-	_ = st.SetAlias("fast", "deepseek", "deepseek-v4-flash")
+	_ = st.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil)
 
 	srv := NewServer("tok", st)
 	resp := getModels(t, srv, nil)
@@ -117,10 +117,10 @@ func TestHandleModels_ModelEntryShape(t *testing.T) {
 
 func TestHandleModels_TeamAliasesIncludedForTeamKey(t *testing.T) {
 	st := openModelsStore(t)
-	_ = st.SetAlias("fast", "deepseek", "global-model")
+	_ = st.SetAlias("fast", "deepseek", "global-model", nil, nil)
 
 	team, _ := st.AddTeam("acme", "Acme")
-	_ = st.SetAliasForTeam("turbo", team.ID, "glm", "glm-turbo")
+	_ = st.SetAliasForTeam("turbo", team.ID, "glm", "glm-turbo", nil, nil)
 
 	ak, _, _ := st.IssueAPIKey(team.ID, "inbound", "test")
 	ak.TeamID = team.ID
@@ -139,10 +139,10 @@ func TestHandleModels_TeamAliasesIncludedForTeamKey(t *testing.T) {
 
 func TestHandleModels_TeamAliasOverridesGlobal(t *testing.T) {
 	st := openModelsStore(t)
-	_ = st.SetAlias("fast", "deepseek", "global-model")
+	_ = st.SetAlias("fast", "deepseek", "global-model", nil, nil)
 
 	team, _ := st.AddTeam("acme2", "Acme2")
-	_ = st.SetAliasForTeam("fast", team.ID, "glm", "team-model")
+	_ = st.SetAliasForTeam("fast", team.ID, "glm", "team-model", nil, nil)
 
 	ak, _, _ := st.IssueAPIKey(team.ID, "inbound", "test")
 	ak.TeamID = team.ID
@@ -168,10 +168,10 @@ func TestHandleModels_TeamAliasOverridesGlobal(t *testing.T) {
 
 func TestHandleModels_NoTeamContext_OnlyGlobals(t *testing.T) {
 	st := openModelsStore(t)
-	_ = st.SetAlias("fast", "deepseek", "global-model")
+	_ = st.SetAlias("fast", "deepseek", "global-model", nil, nil)
 
 	team, _ := st.AddTeam("acme3", "Acme3")
-	_ = st.SetAliasForTeam("secret", team.ID, "glm", "team-only-model")
+	_ = st.SetAliasForTeam("secret", team.ID, "glm", "team-only-model", nil, nil)
 
 	srv := NewServer("tok", st)
 	// No API key in context (legacy token path)

@@ -268,7 +268,7 @@ func TestSetModelAlias_BadForeignKey_ReturnsToolError(t *testing.T) {
 func TestDeleteModelAlias_Success(t *testing.T) {
 	st := openTestStore(t)
 	addTestProvider(t, st, "deepseek")
-	_ = st.SetAlias("fast", "deepseek", "deepseek-v4-flash")
+	_ = st.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil)
 	h := deleteModelAliasHandler(st)
 	res, _ := h(ctxWithScope("mcp_admin"), callTool(map[string]any{"alias": "fast"}))
 	if res.IsError {
@@ -293,8 +293,8 @@ func TestDeleteModelAlias_NotFound(t *testing.T) {
 func TestListModelAliases_ReturnsAll(t *testing.T) {
 	st := openTestStore(t)
 	addTestProvider(t, st, "deepseek")
-	_ = st.SetAlias("fast", "deepseek", "deepseek-v4-flash")
-	_ = st.SetAlias("smart", "deepseek", "deepseek-v4-pro")
+	_ = st.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil)
+	_ = st.SetAlias("smart", "deepseek", "deepseek-v4-pro", nil, nil)
 	h := listModelAliasesHandler(st)
 	res, _ := h(ctxWithScope("mcp_admin"), callTool(nil))
 	text := textContent(t, res)

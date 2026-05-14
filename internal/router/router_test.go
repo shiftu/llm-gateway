@@ -36,7 +36,7 @@ func newStoreWithProvider(t *testing.T, name string, isDefault bool) *store.Stor
 
 func TestResolve_AliasHit(t *testing.T) {
 	s := newStoreWithProvider(t, "deepseek", false)
-	_ = s.SetAlias("fast", "deepseek", "deepseek-v4-flash")
+	_ = s.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil)
 
 	r := New(s)
 	route, err := r.Resolve("fast")
@@ -104,7 +104,7 @@ func TestResolve_AliasOverridesDefault(t *testing.T) {
 		OpenAIBaseURL: "https://open.bigmodel.cn",
 		APIKey:        "k",
 	})
-	_ = s.SetAlias("smart", "glm", "glm-4-plus")
+	_ = s.SetAlias("smart", "glm", "glm-4-plus", nil, nil)
 
 	r := New(s)
 	route, _ := r.Resolve("smart")
@@ -136,8 +136,8 @@ func TestResolveForTeam_TeamAliasBeatsGlobal(t *testing.T) {
 	s, team := newStoreWithTeam(t)
 	_ = s.AddProvider(store.Provider{Name: "global-p", Kind: "deepseek", OpenAIBaseURL: "u1", APIKey: "k"})
 	_ = s.AddProvider(store.Provider{Name: "team-p", Kind: "glm", OpenAIBaseURL: "u2", APIKey: "k"})
-	_ = s.SetAlias("fast", "global-p", "global-model")
-	_ = s.SetAliasForTeam("fast", team.ID, "team-p", "team-model")
+	_ = s.SetAlias("fast", "global-p", "global-model", nil, nil)
+	_ = s.SetAliasForTeam("fast", team.ID, "team-p", "team-model", nil, nil)
 
 	r := New(s)
 	route, err := r.ResolveForTeam("fast", team.ID)
@@ -152,7 +152,7 @@ func TestResolveForTeam_TeamAliasBeatsGlobal(t *testing.T) {
 func TestResolveForTeam_FallsBackToGlobalAlias(t *testing.T) {
 	s, team := newStoreWithTeam(t)
 	_ = s.AddProvider(store.Provider{Name: "deepseek", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
-	_ = s.SetAlias("fast", "deepseek", "deepseek-v4-flash")
+	_ = s.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil)
 	// No team-scoped alias for "fast"
 
 	r := New(s)
@@ -185,8 +185,8 @@ func TestResolveForTeam_EmptyTeamID_GlobalOnly(t *testing.T) {
 	s, team := newStoreWithTeam(t)
 	_ = s.AddProvider(store.Provider{Name: "global-p", Kind: "deepseek", OpenAIBaseURL: "u1", APIKey: "k"})
 	_ = s.AddProvider(store.Provider{Name: "team-p", Kind: "glm", OpenAIBaseURL: "u2", APIKey: "k"})
-	_ = s.SetAlias("fast", "global-p", "global-model")
-	_ = s.SetAliasForTeam("fast", team.ID, "team-p", "team-model")
+	_ = s.SetAlias("fast", "global-p", "global-model", nil, nil)
+	_ = s.SetAliasForTeam("fast", team.ID, "team-p", "team-model", nil, nil)
 
 	r := New(s)
 	route, err := r.ResolveForTeam("fast", "")
@@ -215,7 +215,7 @@ func TestResolveForTeam_NoRoute(t *testing.T) {
 // confirm the router fails gracefully rather than panicking.
 func TestResolve_OrphanedAlias_ErrNoRoute(t *testing.T) {
 	s := newStoreWithProvider(t, "deepseek", false)
-	_ = s.SetAlias("fast", "deepseek", "deepseek-v4-flash")
+	_ = s.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil)
 	// Drop the FK cascade by manually deleting only the provider row using
 	// foreign_keys=off — this mirrors a corrupted state from manual SQL edit
 	// or restored backup.

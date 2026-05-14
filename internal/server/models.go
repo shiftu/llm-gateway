@@ -27,7 +27,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.store == nil {
-		writeModelList(w, nil)
+		writeModelList(w, nil, nil)
 		return
 	}
 
@@ -56,29 +56,52 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeModelList(w, merged)
+	costs, _ := s.store.ListLatestModelCosts() // best-effort; nil map is safe
+	writeModelList(w, merged, costs)
+}
+
+type modelPricing struct {
+	Prompt     float64  `json:"prompt"`
+	Completion float64  `json:"completion"`
+	Reasoning  *float64 `json:"reasoning,omitempty"`
 }
 
 type modelEntry struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
+	ID                  string        `json:"id"`
+	Object              string        `json:"object"`
+	Created             int64         `json:"created"`
+	OwnedBy             string        `json:"owned_by"`
+	ContextLength       *int64        `json:"context_length,omitempty"`
+	MaxCompletionTokens *int64        `json:"max_completion_tokens,omitempty"`
+	Pricing             *modelPricing `json:"pricing,omitempty"`
 }
 
-func writeModelList(w http.ResponseWriter, aliases []store.Alias) {
+func writeModelList(w http.ResponseWriter, aliases []store.Alias, costs map[string]store.ModelCostEntry) {
 	data := make([]modelEntry, 0, len(aliases))
 	for _, a := range aliases {
 		ts := a.CreatedAt.Unix()
 		if ts <= 0 {
 			ts = time.Now().Unix()
 		}
-		data = append(data, modelEntry{
-			ID:      a.Alias,
-			Object:  "model",
-			Created: ts,
-			OwnedBy: a.ProviderName,
-		})
+		entry := modelEntry{
+			ID:                  a.Alias,
+			Object:              "model",
+			Created:             ts,
+			OwnedBy:             a.ProviderName,
+			ContextLength:       a.ContextLength,
+			MaxCompletionTokens: a.MaxCompletionTokens,
+		}
+		if costs != nil {
+			key := a.ProviderName + ":" + a.UpstreamModel
+			if c, ok := costs[key]; ok {
+				entry.Pricing = &modelPricing{
+					Prompt:     c.USDPerInput1K,
+					Completion: c.USDPerOutput1K,
+					Reasoning:  c.USDPerReasoning1K,
+				}
+			}
+		}
+		data = append(data, entry)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

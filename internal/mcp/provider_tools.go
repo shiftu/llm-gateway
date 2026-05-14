@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/panda/llm-gateway/internal/store"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -53,6 +54,8 @@ func RegisterProviderTools(s *mcpserver.MCPServer, st *store.Store) {
 			mcplib.WithString("alias", mcplib.Required(), mcplib.Description("Short alias name, e.g. 'fast' or 'smart'")),
 			mcplib.WithString("provider_name", mcplib.Required(), mcplib.Description("Provider slug this alias routes to")),
 			mcplib.WithString("upstream_model", mcplib.Required(), mcplib.Description("Actual model name at the provider, e.g. 'deepseek-v4-flash'")),
+			mcplib.WithNumber("context_length", mcplib.Description("Context window in tokens (optional). Returned in /v1/models for agent model-selection.")),
+			mcplib.WithNumber("max_completion_tokens", mcplib.Description("Max output tokens (optional). Returned in /v1/models for agent model-selection.")),
 		),
 		setModelAliasHandler(st),
 	)
@@ -68,6 +71,23 @@ func RegisterProviderTools(s *mcpserver.MCPServer, st *store.Store) {
 			mcplib.WithDescription("List all global model aliases with their provider and upstream model."),
 		),
 		listModelAliasesHandler(st),
+	)
+	s.AddTool(
+		mcplib.NewTool("set_model_cost",
+			mcplib.WithDescription("Set pricing for a provider+model pair. Inserts a new effective-from row; history is preserved. Prices are USD per 1K tokens."),
+			mcplib.WithString("provider", mcplib.Required(), mcplib.Description("Provider slug, e.g. 'deepseek'")),
+			mcplib.WithString("model", mcplib.Required(), mcplib.Description("Upstream model name, e.g. 'deepseek-v4-flash'")),
+			mcplib.WithNumber("usd_per_input_1k", mcplib.Required(), mcplib.Description("Input token price in USD per 1K tokens")),
+			mcplib.WithNumber("usd_per_output_1k", mcplib.Required(), mcplib.Description("Output token price in USD per 1K tokens")),
+			mcplib.WithNumber("usd_per_reasoning_1k", mcplib.Description("Reasoning token price in USD per 1K tokens (optional, for reasoning models)")),
+		),
+		setModelCostHandler(st),
+	)
+	s.AddTool(
+		mcplib.NewTool("list_model_costs",
+			mcplib.WithDescription("List current pricing for all provider+model pairs (latest effective row per pair)."),
+		),
+		listModelCostsHandler(st),
 	)
 }
 
@@ -193,7 +213,9 @@ func setModelAliasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 		if alias == "" || providerName == "" || upstreamModel == "" {
 			return mcplib.NewToolResultError("required: alias, provider_name, upstream_model"), nil
 		}
-		if err := st.SetAlias(alias, providerName, upstreamModel); err != nil {
+		contextLength := optInt64(req.GetInt("context_length", 0))
+		maxCompletionTokens := optInt64(req.GetInt("max_completion_tokens", 0))
+		if err := st.SetAlias(alias, providerName, upstreamModel, contextLength, maxCompletionTokens); err != nil {
 			return mcplib.NewToolResultError("set_model_alias failed: " + err.Error()), nil
 		}
 		out, _ := json.Marshal(map[string]any{
@@ -234,13 +256,100 @@ func listModelAliasesHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			return mcplib.NewToolResultError("list_model_aliases failed: " + err.Error()), nil
 		}
 		type row struct {
-			Alias         string `json:"alias"`
-			ProviderName  string `json:"provider_name"`
-			UpstreamModel string `json:"upstream_model"`
+			Alias               string `json:"alias"`
+			ProviderName        string `json:"provider_name"`
+			UpstreamModel       string `json:"upstream_model"`
+			ContextLength       *int64 `json:"context_length,omitempty"`
+			MaxCompletionTokens *int64 `json:"max_completion_tokens,omitempty"`
 		}
 		out := make([]row, len(aliases))
 		for i, a := range aliases {
-			out[i] = row{Alias: a.Alias, ProviderName: a.ProviderName, UpstreamModel: a.UpstreamModel}
+			out[i] = row{
+				Alias:               a.Alias,
+				ProviderName:        a.ProviderName,
+				UpstreamModel:       a.UpstreamModel,
+				ContextLength:       a.ContextLength,
+				MaxCompletionTokens: a.MaxCompletionTokens,
+			}
+		}
+		b, _ := json.Marshal(out)
+		return mcplib.NewToolResultText(string(b)), nil
+	}
+}
+
+// optInt64 converts an int MCP param to *int64. Returns nil when n <= 0.
+func optInt64(n int) *int64 {
+	if n <= 0 {
+		return nil
+	}
+	v := int64(n)
+	return &v
+}
+
+func setModelCostHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "set_model_cost"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		provider := req.GetString("provider", "")
+		model := req.GetString("model", "")
+		inputRaw := req.GetFloat("usd_per_input_1k", 0)
+		outputRaw := req.GetFloat("usd_per_output_1k", 0)
+		if provider == "" || model == "" {
+			return mcplib.NewToolResultError("required: provider, model"), nil
+		}
+		if inputRaw <= 0 || outputRaw <= 0 {
+			return mcplib.NewToolResultError("usd_per_input_1k and usd_per_output_1k must be > 0"), nil
+		}
+		c := store.ModelCost{
+			Provider:      provider,
+			Model:         model,
+			USDPerInput1k: inputRaw,
+			USDPerOutput1k: outputRaw,
+			EffectiveFrom: time.Now(),
+		}
+		if r := req.GetFloat("usd_per_reasoning_1k", 0); r > 0 {
+			v := r
+			c.USDPerReasoning1k = &v
+		}
+		if err := st.SetModelCost(c); err != nil {
+			return mcplib.NewToolResultError("set_model_cost failed: " + err.Error()), nil
+		}
+		out, _ := json.Marshal(map[string]any{
+			"ok": true, "provider": provider, "model": model,
+			"usd_per_input_1k": inputRaw, "usd_per_output_1k": outputRaw,
+		})
+		return mcplib.NewToolResultText(string(out)), nil
+	}
+}
+
+func listModelCostsHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "list_model_costs"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		costs, err := st.ListModelCosts()
+		if err != nil {
+			return mcplib.NewToolResultError("list_model_costs failed: " + err.Error()), nil
+		}
+		type row struct {
+			Provider          string   `json:"provider"`
+			Model             string   `json:"model"`
+			USDPerInput1k     float64  `json:"usd_per_input_1k"`
+			USDPerOutput1k    float64  `json:"usd_per_output_1k"`
+			USDPerReasoning1k *float64 `json:"usd_per_reasoning_1k,omitempty"`
+			EffectiveFrom     int64    `json:"effective_from"`
+		}
+		out := make([]row, len(costs))
+		for i, c := range costs {
+			out[i] = row{
+				Provider:          c.Provider,
+				Model:             c.Model,
+				USDPerInput1k:     c.USDPerInput1k,
+				USDPerOutput1k:    c.USDPerOutput1k,
+				USDPerReasoning1k: c.USDPerReasoning1k,
+				EffectiveFrom:     c.EffectiveFrom.Unix(),
+			}
 		}
 		b, _ := json.Marshal(out)
 		return mcplib.NewToolResultText(string(b)), nil

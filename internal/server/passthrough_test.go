@@ -120,7 +120,7 @@ func TestServer_OpenAIPassthrough_AliasRewritesModel(t *testing.T) {
 	defer upSrv.Close()
 
 	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL})
-	if err := s.SetAlias("fast", "deepseek", "deepseek-v4-flash"); err != nil {
+	if err := s.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	srv := NewServer("gw-token", s)

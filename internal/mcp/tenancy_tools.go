@@ -97,6 +97,8 @@ func RegisterTenancyTools(s *mcpserver.MCPServer, st *store.Store) {
 			mcplib.WithString("alias", mcplib.Required(), mcplib.Description("Alias name visible to this team's inbound requests, e.g. 'fast'")),
 			mcplib.WithString("provider_name", mcplib.Required(), mcplib.Description("Registered provider name to route to")),
 			mcplib.WithString("upstream_model", mcplib.Required(), mcplib.Description("Upstream model name sent to the provider")),
+			mcplib.WithNumber("context_length", mcplib.Description("Context window in tokens (optional). Returned in /v1/models for agent model-selection.")),
+			mcplib.WithNumber("max_completion_tokens", mcplib.Description("Max output tokens (optional). Returned in /v1/models for agent model-selection.")),
 		),
 		setTeamModelAliasHandler(st),
 	)
@@ -470,7 +472,9 @@ func setTeamModelAliasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			}
 			return mcplib.NewToolResultError("set_team_model_alias: lookup team: " + err.Error()), nil
 		}
-		if err := st.SetAliasForTeam(alias, team.ID, providerName, upstreamModel); err != nil {
+		contextLength := optInt64(req.GetInt("context_length", 0))
+		maxCompletionTokens := optInt64(req.GetInt("max_completion_tokens", 0))
+		if err := st.SetAliasForTeam(alias, team.ID, providerName, upstreamModel, contextLength, maxCompletionTokens); err != nil {
 			return mcplib.NewToolResultError("set_team_model_alias failed: " + err.Error()), nil
 		}
 		out, _ := json.Marshal(map[string]any{
@@ -530,18 +534,22 @@ func listTeamModelAliasesHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			return mcplib.NewToolResultError("list_team_model_aliases failed: " + err.Error()), nil
 		}
 		type row struct {
-			Alias         string `json:"alias"`
-			ProviderName  string `json:"provider_name"`
-			UpstreamModel string `json:"upstream_model"`
-			CreatedAt     string `json:"created_at"`
+			Alias               string `json:"alias"`
+			ProviderName        string `json:"provider_name"`
+			UpstreamModel       string `json:"upstream_model"`
+			ContextLength       *int64 `json:"context_length,omitempty"`
+			MaxCompletionTokens *int64 `json:"max_completion_tokens,omitempty"`
+			CreatedAt           string `json:"created_at"`
 		}
 		out := make([]row, len(aliases))
 		for i, a := range aliases {
 			out[i] = row{
-				Alias:         a.Alias,
-				ProviderName:  a.ProviderName,
-				UpstreamModel: a.UpstreamModel,
-				CreatedAt:     a.CreatedAt.UTC().Format(time.RFC3339),
+				Alias:               a.Alias,
+				ProviderName:        a.ProviderName,
+				UpstreamModel:       a.UpstreamModel,
+				ContextLength:       a.ContextLength,
+				MaxCompletionTokens: a.MaxCompletionTokens,
+				CreatedAt:           a.CreatedAt.UTC().Format(time.RFC3339),
 			}
 		}
 		b, _ := json.Marshal(out)

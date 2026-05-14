@@ -146,10 +146,10 @@ func TestAlias_SetGetList_CascadeOnProviderRemove(t *testing.T) {
 	s := openTest(t)
 	_ = s.AddProvider(Provider{Name: "deepseek", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
 
-	if err := s.SetAlias("fast", "deepseek", "deepseek-v4-flash"); err != nil {
+	if err := s.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetAlias("smart", "deepseek", "deepseek-v4-pro"); err != nil {
+	if err := s.SetAlias("smart", "deepseek", "deepseek-v4-pro", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	list, err := s.ListAliases()
@@ -174,8 +174,8 @@ func TestAlias_Upsert(t *testing.T) {
 	s := openTest(t)
 	_ = s.AddProvider(Provider{Name: "p", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
 
-	_ = s.SetAlias("fast", "p", "model-1")
-	_ = s.SetAlias("fast", "p", "model-2") // overwrite
+	_ = s.SetAlias("fast", "p", "model-1", nil, nil)
+	_ = s.SetAlias("fast", "p", "model-2", nil, nil) // overwrite
 	a, _ := s.ResolveAlias("fast")
 	if a.UpstreamModel != "model-2" {
 		t.Errorf("upsert did not overwrite: %+v", a)
@@ -184,7 +184,7 @@ func TestAlias_Upsert(t *testing.T) {
 
 func TestAlias_PointsToMissingProvider_Errors(t *testing.T) {
 	s := openTest(t)
-	err := s.SetAlias("fast", "ghost", "model")
+	err := s.SetAlias("fast", "ghost", "model", nil, nil)
 	if err == nil {
 		t.Fatalf("expected FK error when provider does not exist")
 	}
@@ -261,7 +261,7 @@ func TestTeamAlias_SetListRemove(t *testing.T) {
 	team, _ := s.AddTeam("acme", "Acme")
 	_ = s.AddProvider(Provider{Name: "p", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
 
-	if err := s.SetAliasForTeam("fast", team.ID, "p", "deepseek-v4-flash"); err != nil {
+	if err := s.SetAliasForTeam("fast", team.ID, "p", "deepseek-v4-flash", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -293,8 +293,8 @@ func TestTeamAlias_Upsert(t *testing.T) {
 	team, _ := s.AddTeam("acme2", "Acme2")
 	_ = s.AddProvider(Provider{Name: "p", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
 
-	_ = s.SetAliasForTeam("smart", team.ID, "p", "model-v1")
-	_ = s.SetAliasForTeam("smart", team.ID, "p", "model-v2")
+	_ = s.SetAliasForTeam("smart", team.ID, "p", "model-v1", nil, nil)
+	_ = s.SetAliasForTeam("smart", team.ID, "p", "model-v2", nil, nil)
 
 	a, err := s.ResolveAliasForTeam("smart", team.ID)
 	if err != nil {
@@ -311,8 +311,8 @@ func TestTeamAlias_TeamScopeOverridesGlobal(t *testing.T) {
 	_ = s.AddProvider(Provider{Name: "p1", Kind: "deepseek", OpenAIBaseURL: "u1", APIKey: "k"})
 	_ = s.AddProvider(Provider{Name: "p2", Kind: "glm", OpenAIBaseURL: "u2", APIKey: "k"})
 
-	_ = s.SetAlias("fast", "p1", "global-model")
-	_ = s.SetAliasForTeam("fast", team.ID, "p2", "team-model")
+	_ = s.SetAlias("fast", "p1", "global-model", nil, nil)
+	_ = s.SetAliasForTeam("fast", team.ID, "p2", "team-model", nil, nil)
 
 	a, err := s.ResolveAliasForTeam("fast", team.ID)
 	if err != nil {
@@ -336,7 +336,7 @@ func TestTeamAlias_FallsBackToGlobal(t *testing.T) {
 	s := openTest(t)
 	team, _ := s.AddTeam("acme4", "Acme4")
 	_ = s.AddProvider(Provider{Name: "p", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
-	_ = s.SetAlias("fast", "p", "global-model")
+	_ = s.SetAlias("fast", "p", "global-model", nil, nil)
 	// Team has no "fast" alias of its own
 
 	a, err := s.ResolveAliasForTeam("fast", team.ID)
@@ -362,7 +362,7 @@ func TestTeamAlias_CascadeOnTeamRemove(t *testing.T) {
 	s := openTest(t)
 	team, _ := s.AddTeam("acme6", "Acme6")
 	_ = s.AddProvider(Provider{Name: "p", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
-	_ = s.SetAliasForTeam("fast", team.ID, "p", "model")
+	_ = s.SetAliasForTeam("fast", team.ID, "p", "model", nil, nil)
 
 	// No api_keys for this team so ON DELETE RESTRICT doesn't block us
 	if err := s.RemoveTeam(team.ID); err != nil {
@@ -379,7 +379,7 @@ func TestResolveAlias_GlobalOnly(t *testing.T) {
 	s := openTest(t)
 	team, _ := s.AddTeam("acme7", "Acme7")
 	_ = s.AddProvider(Provider{Name: "p", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
-	_ = s.SetAliasForTeam("fast", team.ID, "p", "team-model")
+	_ = s.SetAliasForTeam("fast", team.ID, "p", "team-model", nil, nil)
 	// No global alias for "fast"
 
 	_, err := s.ResolveAlias("fast")
@@ -393,7 +393,7 @@ func TestRemoveAlias_GlobalOnly(t *testing.T) {
 	s := openTest(t)
 	team, _ := s.AddTeam("acme8", "Acme8")
 	_ = s.AddProvider(Provider{Name: "p", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
-	_ = s.SetAliasForTeam("fast", team.ID, "p", "team-model")
+	_ = s.SetAliasForTeam("fast", team.ID, "p", "team-model", nil, nil)
 
 	err := s.RemoveAlias("fast")
 	if err != ErrNotFound {
