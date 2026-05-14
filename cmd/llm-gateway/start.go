@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,23 +32,6 @@ func runStart() int {
 		fmt.Fprintf(os.Stderr, "could not resolve token: %v\n", err)
 		return 1
 	}
-	switch source {
-	case tokenSourceEnv:
-		log.Print("token source: LLM_GATEWAY_TOKEN env")
-	case tokenSourceFile:
-		log.Print("token source: ", cfgDir, "/token")
-	case tokenSourceEphemeral:
-		fmt.Println("No persistent token found — minted an ephemeral one for this session:")
-		fmt.Println()
-		fmt.Println("  ", token)
-		fmt.Println()
-		fmt.Println("OpenAI clients:    Authorization: Bearer", token)
-		fmt.Println("Anthropic clients: x-api-key:", token)
-		fmt.Println()
-		fmt.Println("Run `llm-gateway init` to persist a stable token across restarts.")
-		fmt.Println()
-	}
-
 	addr := os.Getenv("LLM_GATEWAY_ADDR")
 	if addr == "" {
 		addr = defaultAddr
@@ -71,20 +53,57 @@ func runStart() int {
 		return 1
 	}
 	srv := server.NewServer(token, st)
-	if st == nil {
-		log.Print("store disabled — running in stub mode")
-	} else {
-		providers, _ := st.ListProviders()
-		log.Printf("store ready: %d provider(s) configured", len(providers))
-	}
 
-	log.Printf("llm-gateway %s listening on http://%s", version, addr)
+	printBanner(token, source, cfgDir, addr, st)
+
 	if err := srv.Run(ctx, addr); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		return 1
 	}
-	log.Print("llm-gateway shut down cleanly")
+	fmt.Fprintln(os.Stderr, "llm-gateway shut down cleanly")
 	return 0
+}
+
+// printBanner writes the startup banner to stdout. Using stdout (not log)
+// keeps the banner clean and machine-parseable by scripts that capture it.
+func printBanner(token, source, cfgDir, addr string, st *store.Store) {
+	sep := "----------------------------------------"
+	fmt.Println(sep)
+	fmt.Printf(" llm-gateway %s\n", version)
+	fmt.Printf(" listen:  http://%s\n", addr)
+
+	switch source {
+	case tokenSourceEnv:
+		fmt.Println(" token:   (LLM_GATEWAY_TOKEN env)")
+	case tokenSourceFile:
+		fmt.Printf(" token:   %s/token\n", cfgDir)
+	case tokenSourceEphemeral:
+		fmt.Printf(" token:   %s  [ephemeral — run `init` to persist]\n", token)
+	}
+
+	if st != nil {
+		providers, _ := st.ListProviders()
+		fmt.Printf(" providers: %d configured\n", len(providers))
+	} else {
+		fmt.Println(" store:   disabled (stub mode)")
+	}
+
+	fmt.Println(sep)
+	tok8 := token
+	if len(tok8) > 12 {
+		tok8 = tok8[:12] + "..."
+	}
+	fmt.Println(" OpenAI:    Authorization: Bearer", tok8)
+	fmt.Println(" Anthropic: x-api-key:", tok8)
+	fmt.Println(" MCP:       llm-gateway mcp-config --client=1")
+	fmt.Println(sep)
+
+	if source == tokenSourceEphemeral {
+		fmt.Println()
+		fmt.Println(" WARNING: ephemeral token — not persisted across restarts.")
+		fmt.Println(" Run `llm-gateway init` to generate a stable token.")
+		fmt.Println()
+	}
 }
 
 // openStore returns a SQLite-backed store at <cfgDir>/state.db, or nil if

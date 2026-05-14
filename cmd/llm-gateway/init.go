@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/panda/llm-gateway/internal/store"
 )
 
 // Token source-of-truth labels returned by resolveToken so callers can log
@@ -90,10 +92,14 @@ func mintToken() (string, error) {
 // runInit implements the `init` subcommand. Writes the token file, then
 // prints copy-pastable config snippets for Cline and Claude Desktop so the
 // operator can wire the gateway into their agent in one minute (F-DX-01).
+//
+// --team=<slug> additionally creates a team in the store and issues an
+// inbound-scoped API key for it, printing the lgw_ token once at issuance.
 func runInit(args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	force := fs.Bool("force", false, "overwrite an existing token file")
 	addr := fs.String("addr", defaultAddr, "gateway listen address (for printed config snippets)")
+	team := fs.String("team", "", "create a team with this slug and issue an inbound API key")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -135,5 +141,48 @@ func runInit(args []string) int {
 	fmt.Println("  LLM_GATEWAY_PROVIDER_KIND=deepseek \\")
 	fmt.Println("  LLM_GATEWAY_PROVIDER_API_KEY=<your-key> \\")
 	fmt.Println("  llm-gateway start")
+
+	if *team != "" {
+		if code := runInitTeam(dir, *team); code != 0 {
+			return code
+		}
+	}
+	return 0
+}
+
+// runInitTeam opens (or creates) the store, ensures the team exists, issues an
+// inbound API key, and prints the token. Idempotent: if the team already exists
+// a new key is still issued (multiple keys per team are fine).
+func runInitTeam(cfgDir, slug string) int {
+	st, err := openStore(cfgDir)
+	if err != nil || st == nil {
+		fmt.Fprintf(os.Stderr, "init --team: could not open store: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	team, err := st.AddTeam(slug, slug)
+	if errors.Is(err, store.ErrDuplicate) {
+		team, err = st.GetTeamBySlug(slug)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init --team: team %q: %v\n", slug, err)
+		return 1
+	}
+
+	_, apiTok, err := st.IssueAPIKey(team.ID, "inbound", "init")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init --team: issue API key: %v\n", err)
+		return 1
+	}
+
+	fmt.Println()
+	fmt.Println("Team:           ", slug)
+	fmt.Println("Inbound API key (shown once):")
+	fmt.Println("  " + apiTok)
+	fmt.Println()
+	fmt.Println("Use this key instead of the legacy token for inbound requests:")
+	fmt.Println("  Authorization: Bearer " + apiTok)
+	fmt.Println("  x-api-key:     " + apiTok)
 	return 0
 }
