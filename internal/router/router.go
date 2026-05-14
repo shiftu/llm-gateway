@@ -42,9 +42,17 @@ type Router struct {
 func New(s *store.Store) *Router { return &Router{store: s} }
 
 // Resolve picks the upstream Provider + model for a client-requested model name.
-// See package doc for the priority order.
+// Equivalent to ResolveForTeam with an empty teamID (global-only alias lookup).
 func (r *Router) Resolve(clientModel string) (Route, error) {
-	if alias, err := r.store.ResolveAlias(clientModel); err == nil {
+	return r.ResolveForTeam(clientModel, "")
+}
+
+// ResolveForTeam resolves clientModel with team-aware priority:
+//  1. Team-scoped alias  (when teamID != "")
+//  2. Global alias       (team_id IS NULL)
+//  3. Global default provider (pass clientModel through)
+func (r *Router) ResolveForTeam(clientModel, teamID string) (Route, error) {
+	if alias, err := r.store.ResolveAliasForTeam(clientModel, teamID); err == nil {
 		p, perr := r.store.GetProvider(alias.ProviderName)
 		if perr != nil {
 			if errors.Is(perr, store.ErrNotFound) {

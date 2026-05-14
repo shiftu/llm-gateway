@@ -116,6 +116,100 @@ func TestResolve_AliasOverridesDefault(t *testing.T) {
 	}
 }
 
+// --- ResolveForTeam tests (T18) ---
+
+func newStoreWithTeam(t *testing.T) (*store.Store, store.Team) {
+	t.Helper()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	team, err := s.AddTeam("acme", "Acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, team
+}
+
+func TestResolveForTeam_TeamAliasBeatsGlobal(t *testing.T) {
+	s, team := newStoreWithTeam(t)
+	_ = s.AddProvider(store.Provider{Name: "global-p", Kind: "deepseek", OpenAIBaseURL: "u1", APIKey: "k"})
+	_ = s.AddProvider(store.Provider{Name: "team-p", Kind: "glm", OpenAIBaseURL: "u2", APIKey: "k"})
+	_ = s.SetAlias("fast", "global-p", "global-model")
+	_ = s.SetAliasForTeam("fast", team.ID, "team-p", "team-model")
+
+	r := New(s)
+	route, err := r.ResolveForTeam("fast", team.ID)
+	if err != nil {
+		t.Fatalf("ResolveForTeam: %v", err)
+	}
+	if route.Provider.Name != "team-p" || route.UpstreamModel != "team-model" {
+		t.Errorf("team alias not selected: provider=%s model=%s", route.Provider.Name, route.UpstreamModel)
+	}
+}
+
+func TestResolveForTeam_FallsBackToGlobalAlias(t *testing.T) {
+	s, team := newStoreWithTeam(t)
+	_ = s.AddProvider(store.Provider{Name: "deepseek", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
+	_ = s.SetAlias("fast", "deepseek", "deepseek-v4-flash")
+	// No team-scoped alias for "fast"
+
+	r := New(s)
+	route, err := r.ResolveForTeam("fast", team.ID)
+	if err != nil {
+		t.Fatalf("ResolveForTeam: %v", err)
+	}
+	if route.Provider.Name != "deepseek" || route.UpstreamModel != "deepseek-v4-flash" {
+		t.Errorf("global alias fallback failed: provider=%s model=%s", route.Provider.Name, route.UpstreamModel)
+	}
+}
+
+func TestResolveForTeam_FallsBackToDefaultProvider(t *testing.T) {
+	s, team := newStoreWithTeam(t)
+	_ = s.AddProvider(store.Provider{Name: "deepseek", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k", IsDefault: true})
+	// No aliases at all
+
+	r := New(s)
+	route, err := r.ResolveForTeam("some-model", team.ID)
+	if err != nil {
+		t.Fatalf("ResolveForTeam: %v", err)
+	}
+	if route.Provider.Name != "deepseek" || route.UpstreamModel != "some-model" {
+		t.Errorf("default provider fallback failed: provider=%s model=%s", route.Provider.Name, route.UpstreamModel)
+	}
+}
+
+func TestResolveForTeam_EmptyTeamID_GlobalOnly(t *testing.T) {
+	// Empty teamID is the legacy-token path — team aliases must not interfere.
+	s, team := newStoreWithTeam(t)
+	_ = s.AddProvider(store.Provider{Name: "global-p", Kind: "deepseek", OpenAIBaseURL: "u1", APIKey: "k"})
+	_ = s.AddProvider(store.Provider{Name: "team-p", Kind: "glm", OpenAIBaseURL: "u2", APIKey: "k"})
+	_ = s.SetAlias("fast", "global-p", "global-model")
+	_ = s.SetAliasForTeam("fast", team.ID, "team-p", "team-model")
+
+	r := New(s)
+	route, err := r.ResolveForTeam("fast", "")
+	if err != nil {
+		t.Fatalf("ResolveForTeam: %v", err)
+	}
+	if route.Provider.Name != "global-p" {
+		t.Errorf("empty teamID must use global alias, got provider %q", route.Provider.Name)
+	}
+}
+
+func TestResolveForTeam_NoRoute(t *testing.T) {
+	s, team := newStoreWithTeam(t)
+	_ = s.AddProvider(store.Provider{Name: "p", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})
+	// No aliases, no default provider
+
+	r := New(s)
+	_, err := r.ResolveForTeam("model", team.ID)
+	if !errors.Is(err, ErrNoRoute) {
+		t.Errorf("want ErrNoRoute, got %v", err)
+	}
+}
+
 // F-11 simulation: alias rows that survive a force-removed provider. Real
 // schema cascades on delete; we manufacture the orphan by direct SQL to
 // confirm the router fails gracefully rather than panicking.

@@ -405,41 +405,46 @@ func (s *Store) SetAlias(alias, providerName, upstreamModel string) error {
 
 func (s *Store) ResolveAlias(alias string) (Alias, error) {
 	row := s.db.QueryRow(`SELECT alias, provider_name, upstream_model, created_at
-		FROM model_aliases WHERE alias = ?`, alias)
-	var a Alias
-	var createdAt int64
-	if err := row.Scan(&a.Alias, &a.ProviderName, &a.UpstreamModel, &createdAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Alias{}, ErrNotFound
+		FROM model_aliases WHERE alias = ? AND team_id IS NULL`, alias)
+	return scanAlias(row)
+}
+
+// ResolveAliasForTeam resolves an alias by checking team-scoped aliases first,
+// then falling back to global aliases (team_id IS NULL).
+func (s *Store) ResolveAliasForTeam(alias, teamID string) (Alias, error) {
+	if teamID != "" {
+		row := s.db.QueryRow(`SELECT alias, provider_name, upstream_model, created_at
+			FROM model_aliases WHERE alias = ? AND team_id = ?`, alias, teamID)
+		if a, err := scanAlias(row); err == nil {
+			return a, nil
+		} else if !errors.Is(err, ErrNotFound) {
+			return Alias{}, err
 		}
-		return Alias{}, err
 	}
-	a.CreatedAt = time.UnixMilli(createdAt)
-	return a, nil
+	return s.ResolveAlias(alias)
 }
 
 func (s *Store) ListAliases() ([]Alias, error) {
 	rows, err := s.db.Query(`SELECT alias, provider_name, upstream_model, created_at
-		FROM model_aliases ORDER BY alias ASC`)
+		FROM model_aliases WHERE team_id IS NULL ORDER BY alias ASC`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Alias
-	for rows.Next() {
-		var a Alias
-		var createdAt int64
-		if err := rows.Scan(&a.Alias, &a.ProviderName, &a.UpstreamModel, &createdAt); err != nil {
-			return nil, err
-		}
-		a.CreatedAt = time.UnixMilli(createdAt)
-		out = append(out, a)
+	return collectAliases(rows)
+}
+
+// ListAliasesForTeam returns aliases scoped to a specific team, ordered by alias.
+func (s *Store) ListAliasesForTeam(teamID string) ([]Alias, error) {
+	rows, err := s.db.Query(`SELECT alias, provider_name, upstream_model, created_at
+		FROM model_aliases WHERE team_id = ? ORDER BY alias ASC`, teamID)
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	return collectAliases(rows)
 }
 
 func (s *Store) RemoveAlias(alias string) error {
-	res, err := s.db.Exec(`DELETE FROM model_aliases WHERE alias = ?`, alias)
+	res, err := s.db.Exec(`DELETE FROM model_aliases WHERE alias = ? AND team_id IS NULL`, alias)
 	if err != nil {
 		return err
 	}
@@ -448,6 +453,31 @@ func (s *Store) RemoveAlias(alias string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// RemoveAliasForTeam deletes a team-scoped alias.
+func (s *Store) RemoveAliasForTeam(alias, teamID string) error {
+	res, err := s.db.Exec(`DELETE FROM model_aliases WHERE alias = ? AND team_id = ?`, alias, teamID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAliasForTeam is upsert for team-scoped aliases.
+func (s *Store) SetAliasForTeam(alias, teamID, providerName, upstreamModel string) error {
+	now := time.Now().UnixMilli()
+	_, err := s.db.Exec(`INSERT INTO model_aliases (alias, team_id, provider_name, upstream_model, created_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(alias, team_id) DO UPDATE SET
+			provider_name = excluded.provider_name,
+			upstream_model = excluded.upstream_model`,
+		alias, teamID, providerName, upstreamModel, now)
+	return err
 }
 
 // RequestLog mirrors a row in request_logs. The HTTP handler writes one per
@@ -655,4 +685,30 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func scanAlias(r rowScanner) (Alias, error) {
+	var a Alias
+	var createdAt int64
+	if err := r.Scan(&a.Alias, &a.ProviderName, &a.UpstreamModel, &createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Alias{}, ErrNotFound
+		}
+		return Alias{}, err
+	}
+	a.CreatedAt = time.UnixMilli(createdAt)
+	return a, nil
+}
+
+func collectAliases(rows *sql.Rows) ([]Alias, error) {
+	defer rows.Close()
+	var out []Alias
+	for rows.Next() {
+		a, err := scanAlias(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
