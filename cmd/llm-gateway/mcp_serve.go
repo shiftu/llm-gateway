@@ -46,6 +46,7 @@ func runMCPServe() int {
 
 	cache := authpkg.NewKeyCache(60 * time.Second)
 	s := lgwmcp.Build()
+	lgwmcp.RegisterProviderTools(s, st)
 
 	stdio := mcpserver.NewStdioServer(s)
 	stdio.SetContextFunc(lgwmcp.MakeContextFunc(token, st, cache))
