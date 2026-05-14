@@ -81,6 +81,15 @@ func RegisterTenancyTools(s *mcpserver.MCPServer, st *store.Store) {
 		),
 		listQuotasHandler(st),
 	)
+	s.AddTool(
+		mcplib.NewTool("list_request_logs",
+			mcplib.WithDescription("Tail recent request logs. Optionally filter by team or API key. Returns newest-first."),
+			mcplib.WithString("team_slug", mcplib.Description("Filter to a specific team (optional)")),
+			mcplib.WithString("key_id", mcplib.Description("Filter to a specific API key ID ak_xxxx (optional)")),
+			mcplib.WithNumber("limit", mcplib.Description("Max rows to return (1–200, default 50)")),
+		),
+		listRequestLogsHandler(st),
+	)
 }
 
 // --- handler factories ---
@@ -348,6 +357,75 @@ func listQuotasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 }
 
 // quotaRow converts a Quota to a JSON-serialisable map, omitting nil limits.
+func listRequestLogsHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "list_request_logs"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		teamSlug := req.GetString("team_slug", "")
+		keyID := req.GetString("key_id", "")
+		limit := 50
+		if v, ok := req.GetArguments()["limit"]; ok && v != nil {
+			limit = int(v.(float64))
+		}
+
+		f := store.ListRequestLogsFilter{APIKeyID: keyID, Limit: limit}
+		if teamSlug != "" {
+			team, err := st.GetTeamBySlug(teamSlug)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return mcplib.NewToolResultError("team not found: " + teamSlug), nil
+				}
+				return mcplib.NewToolResultError("list_request_logs: " + err.Error()), nil
+			}
+			f.TeamID = team.ID
+		}
+
+		logs, err := st.ListRequestLogs(f)
+		if err != nil {
+			return mcplib.NewToolResultError("list_request_logs failed: " + err.Error()), nil
+		}
+
+		type row struct {
+			ID               int64  `json:"id"`
+			Ts               string `json:"ts"`
+			ClientModel      string `json:"client_model"`
+			ResolvedModel    string `json:"resolved_model,omitempty"`
+			ProviderName     string `json:"provider_name"`
+			PromptTokens     int    `json:"prompt_tokens"`
+			CompletionTokens int    `json:"completion_tokens"`
+			TotalTokens      int    `json:"total_tokens"`
+			LatencyMs        int    `json:"latency_ms"`
+			Status           string `json:"status"`
+			ErrorMsg         string `json:"error_msg,omitempty"`
+			PromptExcerpt    string `json:"prompt_excerpt,omitempty"`
+			APIKeyID         string `json:"api_key_id,omitempty"`
+			TeamID           string `json:"team_id,omitempty"`
+		}
+		out := make([]row, len(logs))
+		for i, l := range logs {
+			out[i] = row{
+				ID:               l.ID,
+				Ts:               l.Ts.UTC().Format(time.RFC3339),
+				ClientModel:      l.ClientModel,
+				ResolvedModel:    l.ResolvedModel,
+				ProviderName:     l.ProviderName,
+				PromptTokens:     l.PromptTokens,
+				CompletionTokens: l.CompletionTokens,
+				TotalTokens:      l.TotalTokens,
+				LatencyMs:        l.LatencyMs,
+				Status:           l.Status,
+				ErrorMsg:         l.ErrorMsg,
+				PromptExcerpt:    l.PromptExcerpt,
+				APIKeyID:         l.APIKeyID,
+				TeamID:           l.TeamID,
+			}
+		}
+		b, _ := json.Marshal(out)
+		return mcplib.NewToolResultText(string(b)), nil
+	}
+}
+
 func quotaRow(q store.Quota) map[string]any {
 	m := map[string]any{
 		"scope_kind": q.ScopeKind,

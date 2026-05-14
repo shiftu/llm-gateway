@@ -465,6 +465,17 @@ type RequestLog struct {
 	Status           string // "ok" | "upstream_error" | "timeout" | "abort"
 	ErrorMsg         string
 	PromptExcerpt    string
+	// v2 tenancy columns — empty string when not set
+	APIKeyID string
+	TeamID   string
+}
+
+// ListRequestLogsFilter controls which rows ListRequestLogs returns.
+// Zero values mean "no filter". Limit defaults to 50; max 200.
+type ListRequestLogsFilter struct {
+	TeamID   string // internal UUID (already resolved from slug by the caller)
+	APIKeyID string // ak_xxxx
+	Limit    int
 }
 
 func (s *Store) LogRequest(r RequestLog) (int64, error) {
@@ -474,11 +485,12 @@ func (s *Store) LogRequest(r RequestLog) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO request_logs
 		(ts, client_model, resolved_model, provider_name,
 		 prompt_tokens, completion_tokens, total_tokens, latency_ms,
-		 status, error_msg, prompt_excerpt)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 status, error_msg, prompt_excerpt, api_key_id, team_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Ts.UnixMilli(), r.ClientModel, r.ResolvedModel, r.ProviderName,
 		r.PromptTokens, r.CompletionTokens, r.TotalTokens, r.LatencyMs,
-		r.Status, nullable(r.ErrorMsg), nullable(r.PromptExcerpt))
+		r.Status, nullable(r.ErrorMsg), nullable(r.PromptExcerpt),
+		nullable(r.APIKeyID), nullable(r.TeamID))
 	if err != nil {
 		return 0, err
 	}
@@ -515,6 +527,72 @@ func (s *Store) GetRequestLog(id int64) (RequestLog, error) {
 		return RequestLog{}, ErrNotFound
 	}
 	return r, err
+}
+
+// ListRequestLogs returns logs newest-first, optionally filtered by team or
+// key. Limit defaults to 50 and is capped at 200.
+func (s *Store) ListRequestLogs(f ListRequestLogsFilter) ([]RequestLog, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	q := `SELECT id, ts, client_model, resolved_model, provider_name,
+		prompt_tokens, completion_tokens, total_tokens, latency_ms,
+		status, error_msg, prompt_excerpt,
+		COALESCE(api_key_id, '') AS api_key_id,
+		COALESCE(team_id, '') AS team_id
+		FROM request_logs`
+
+	var args []any
+	var where []string
+	if f.TeamID != "" {
+		where = append(where, "team_id = ?")
+		args = append(args, f.TeamID)
+	}
+	if f.APIKeyID != "" {
+		where = append(where, "api_key_id = ?")
+		args = append(args, f.APIKeyID)
+	}
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " ORDER BY ts DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RequestLog
+	for rows.Next() {
+		var rl RequestLog
+		var ts int64
+		var errMsg, excerpt sql.NullString
+		var promptT, completionT, totalT, latency sql.NullInt64
+		err := rows.Scan(
+			&rl.ID, &ts, &rl.ClientModel, &rl.ResolvedModel, &rl.ProviderName,
+			&promptT, &completionT, &totalT, &latency,
+			&rl.Status, &errMsg, &excerpt,
+			&rl.APIKeyID, &rl.TeamID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		rl.Ts = time.UnixMilli(ts)
+		rl.PromptTokens = int(promptT.Int64)
+		rl.CompletionTokens = int(completionT.Int64)
+		rl.TotalTokens = int(totalT.Int64)
+		rl.LatencyMs = int(latency.Int64)
+		rl.ErrorMsg = errMsg.String
+		rl.PromptExcerpt = excerpt.String
+		out = append(out, rl)
+	}
+	return out, rows.Err()
 }
 
 // --- helpers ---

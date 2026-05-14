@@ -298,3 +298,129 @@ func TestListQuotas_ReturnsAllWindows(t *testing.T) {
 		t.Errorf("want 2 quota rows, got %d", len(rows))
 	}
 }
+
+// --- list_request_logs ---
+
+func seedLog(t *testing.T, st *store.Store, teamID, keyID, model string) {
+	t.Helper()
+	_, err := st.LogRequest(store.RequestLog{
+		ClientModel:  model,
+		ProviderName: "deepseek",
+		Status:       "ok",
+		TeamID:       teamID,
+		APIKeyID:     keyID,
+	})
+	if err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+}
+
+func TestListRequestLogs_Empty_ReturnsEmptyArray(t *testing.T) {
+	st := openTestStore(t)
+	h := listRequestLogsHandler(st)
+	res, _ := h(ctxWithScope("mcp_admin"), callTool(nil))
+	if res.IsError {
+		t.Fatalf("unexpected error: %v", res.Content)
+	}
+	if textContent(t, res) != "[]" {
+		t.Error("expected empty array for no logs")
+	}
+}
+
+func TestListRequestLogs_NoFilter_ReturnsAll(t *testing.T) {
+	st := openTestStore(t)
+	for _, m := range []string{"m1", "m2", "m3"} {
+		seedLog(t, st, "", "", m)
+	}
+	h := listRequestLogsHandler(st)
+	res, _ := h(ctxWithScope("mcp_admin"), callTool(nil))
+	if res.IsError {
+		t.Fatalf("unexpected error: %v", res.Content)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(textContent(t, res)), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Errorf("want 3 rows, got %d", len(rows))
+	}
+}
+
+func TestListRequestLogs_FilterByTeam(t *testing.T) {
+	st := openTestStore(t)
+	team, _ := st.AddTeam("acme", "Acme")
+	seedLog(t, st, team.ID, "", "team-req")
+	seedLog(t, st, "", "", "other-req")
+	h := listRequestLogsHandler(st)
+	res, _ := h(ctxWithScope("mcp_admin"), callTool(map[string]any{"team_slug": "acme"}))
+	if res.IsError {
+		t.Fatalf("unexpected error: %v", res.Content)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(textContent(t, res)), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("want 1 row for team filter, got %d", len(rows))
+	}
+	if rows[0]["client_model"] != "team-req" {
+		t.Errorf("wrong row returned: %v", rows[0]["client_model"])
+	}
+}
+
+func TestListRequestLogs_FilterByKeyID(t *testing.T) {
+	st := openTestStore(t)
+	team, _ := st.AddTeam("acme", "Acme")
+	ak, _, _ := st.IssueAPIKey(team.ID, "inbound", "k1")
+	seedLog(t, st, "", ak.ID, "key-req")
+	seedLog(t, st, "", "", "other-req")
+	h := listRequestLogsHandler(st)
+	res, _ := h(ctxWithScope("mcp_admin"), callTool(map[string]any{"key_id": ak.ID}))
+	if res.IsError {
+		t.Fatalf("unexpected error: %v", res.Content)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(textContent(t, res)), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("want 1 row for key filter, got %d", len(rows))
+	}
+}
+
+func TestListRequestLogs_LimitRespected(t *testing.T) {
+	st := openTestStore(t)
+	for i := 0; i < 5; i++ {
+		seedLog(t, st, "", "", "m")
+	}
+	h := listRequestLogsHandler(st)
+	res, _ := h(ctxWithScope("mcp_admin"), callTool(map[string]any{"limit": float64(3)}))
+	if res.IsError {
+		t.Fatalf("unexpected error: %v", res.Content)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(textContent(t, res)), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Errorf("want 3 rows (limit=3), got %d", len(rows))
+	}
+}
+
+func TestListRequestLogs_TeamNotFound_ReturnsToolError(t *testing.T) {
+	st := openTestStore(t)
+	h := listRequestLogsHandler(st)
+	res, _ := h(ctxWithScope("mcp_admin"), callTool(map[string]any{"team_slug": "ghost"}))
+	if !res.IsError {
+		t.Error("expected tool error for unknown team")
+	}
+}
+
+func TestListRequestLogs_InsufficientScope_Denied(t *testing.T) {
+	st := openTestStore(t)
+	h := listRequestLogsHandler(st)
+	res, _ := h(ctxWithScope("inbound"), callTool(nil))
+	if !res.IsError {
+		t.Error("expected permission denied for inbound scope")
+	}
+}
