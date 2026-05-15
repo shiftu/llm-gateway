@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/panda/llm-gateway/internal/encrypt"
 	"github.com/panda/llm-gateway/internal/server"
 	"github.com/panda/llm-gateway/internal/store"
 )
@@ -48,6 +49,16 @@ func runStart() int {
 	}
 	if st != nil {
 		defer st.Close()
+	}
+
+	// Inject encryption for provider API keys
+	mk, mkErr := encrypt.NewFromEnvOrFile(cfgDir)
+	if mkErr == nil {
+		st.SetEncryptor(mk)
+	} else {
+		// No master key — check if any provider keys are already encrypted
+		// (would be unreadable). Warn but don't crash for v0.1 compat.
+		fmt.Fprintf(os.Stderr, "note: no master key — provider API keys stored plaintext\n")
 	}
 	if err := seedProviderFromEnv(st); err != nil {
 		fmt.Fprintf(os.Stderr, "could not seed provider from env: %v\n", err)

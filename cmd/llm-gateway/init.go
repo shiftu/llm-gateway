@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/panda/llm-gateway/internal/encrypt"
 	"github.com/panda/llm-gateway/internal/store"
 )
 
@@ -98,7 +99,6 @@ func mintToken() (string, error) {
 func runInit(args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	force := fs.Bool("force", false, "overwrite an existing token file")
-	addr := fs.String("addr", defaultAddr, "gateway listen address (for printed config snippets)")
 	team := fs.String("team", "", "create a team with this slug and issue an inbound API key")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -120,21 +120,34 @@ func runInit(args []string) int {
 		return 1
 	}
 
+	// Generate master key for provider API key encryption
+	_, masterKeyPath, err := encrypt.GenerateAndWrite(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not generate master.key: %v\n", err)
+		masterKeyPath = ""
+	}
+
 	tokenPath := filepath.Join(dir, "token")
 	fmt.Println("llm-gateway initialized")
 	fmt.Println()
 	fmt.Println("Token written to:", tokenPath, "(0600)")
 	fmt.Println("Token value:    ", tok)
 	fmt.Println()
+	if masterKeyPath != "" {
+		fmt.Println("Master key written to:", masterKeyPath, "(0600)")
+		fmt.Println("Provider API keys will be encrypted at rest.")
+		fmt.Println("Docker: set LLM_GATEWAY_MASTER_KEY env var instead of file.")
+		fmt.Println()
+	}
 	fmt.Println("Start the gateway:")
 	fmt.Println("  llm-gateway start")
 	fmt.Println()
 	fmt.Println("OpenAI-compat clients (Cline / Cursor / Continue / SDKs):")
-	fmt.Println("  base_url:      http://" + *addr + "/v1")
+	fmt.Println("  base_url:      http://127.0.0.1:7421/v1")
 	fmt.Println("  Authorization: Bearer " + tok)
 	fmt.Println()
 	fmt.Println("Anthropic-compat clients (Claude Code / Claude Desktop):")
-	fmt.Println("  base_url:      http://" + *addr)
+	fmt.Println("  base_url:      http://127.0.0.1:7421")
 	fmt.Println("  x-api-key:     " + tok)
 	fmt.Println()
 	fmt.Println("Configure an upstream LLM provider via env on `start`:")

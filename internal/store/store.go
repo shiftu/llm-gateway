@@ -43,8 +43,22 @@ var (
 
 // Store is the gateway's persistence root. Hold one per process.
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	enc encryptor // nil = plaintext (v0.1 compat)
 }
+
+// encryptor abstracts the encrypt.MasterKey operations the store needs.
+// This avoids a direct import of internal/encrypt (prevents circular deps
+// in tests) and keeps the store testable with a no-op encryptor.
+type encryptor interface {
+	Encrypt(plaintext []byte) (string, error)
+	Decrypt(encoded string) ([]byte, error)
+	IsEncryptedMethod(s string) bool
+}
+
+// SetEncryptor injects an AEAD encryptor. Call before any provider CRUD.
+// If never called, provider API keys are stored/returned as plaintext (v0.1 compat).
+func (s *Store) SetEncryptor(e encryptor) { s.enc = e }
 
 // Open accepts a filesystem path or ":memory:". Applies migrations on
 // success. Caller is responsible for Close.
@@ -283,12 +297,23 @@ func (s *Store) AddProvider(p Provider) error {
 		av = DefaultAnthropicVersion
 	}
 	now := time.Now().UnixMilli()
+
+	// Encrypt API key before storage if encryptor is set
+	apiKey := p.APIKey
+	if s.enc != nil && !s.enc.IsEncryptedMethod(apiKey) {
+		enc, err := s.enc.Encrypt([]byte(apiKey))
+		if err != nil {
+			return fmt.Errorf("store: encrypt provider key: %w", err)
+		}
+		apiKey = enc
+	}
+
 	_, err := s.db.Exec(`INSERT INTO providers
 		(name, kind, openai_base_url, anthropic_base_url, api_key,
 		 anthropic_version, is_default, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Name, p.Kind, nullable(p.OpenAIBaseURL), nullable(p.AnthropicBaseURL),
-		p.APIKey, av, boolInt(p.IsDefault), now)
+		apiKey, av, boolInt(p.IsDefault), now)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrDuplicate
@@ -302,7 +327,11 @@ func (s *Store) GetProvider(name string) (Provider, error) {
 	row := s.db.QueryRow(`SELECT name, kind, openai_base_url, anthropic_base_url,
 		api_key, anthropic_version, is_default, created_at
 		FROM providers WHERE name = ?`, name)
-	return scanProvider(row)
+	p, err := scanProvider(row)
+	if err != nil {
+		return Provider{}, err
+	}
+	return s.decryptProviderKey(p)
 }
 
 func (s *Store) ListProviders() ([]Provider, error) {
@@ -316,6 +345,10 @@ func (s *Store) ListProviders() ([]Provider, error) {
 	var out []Provider
 	for rows.Next() {
 		p, err := scanProvider(rows)
+		if err != nil {
+			return nil, err
+		}
+		p, err = s.decryptProviderKey(p)
 		if err != nil {
 			return nil, err
 		}
@@ -343,7 +376,11 @@ func (s *Store) GetDefaultProvider() (Provider, error) {
 	row := s.db.QueryRow(`SELECT name, kind, openai_base_url, anthropic_base_url,
 		api_key, anthropic_version, is_default, created_at
 		FROM providers WHERE is_default = 1 LIMIT 1`)
-	return scanProvider(row)
+	p, err := scanProvider(row)
+	if err != nil {
+		return Provider{}, err
+	}
+	return s.decryptProviderKey(p)
 }
 
 // SetDefaultProvider clears the previous default in one transaction so
@@ -641,6 +678,21 @@ func scanProvider(r rowScanner) (Provider, error) {
 	p.AnthropicBaseURL = anthropic.String
 	p.IsDefault = isDefault == 1
 	p.CreatedAt = time.UnixMilli(createdAt)
+	return p, nil
+}
+
+// decryptProviderKey decrypts the API key if an encryptor is set and the
+// stored value has the lgw_enc:v1: prefix. Plaintext keys (v0.1 compat)
+// are returned unchanged even when an encryptor is present.
+func (s *Store) decryptProviderKey(p Provider) (Provider, error) {
+	if s.enc == nil || !s.enc.IsEncryptedMethod(p.APIKey) {
+		return p, nil
+	}
+	plain, err := s.enc.Decrypt(p.APIKey)
+	if err != nil {
+		return Provider{}, fmt.Errorf("store: decrypt provider %q key: %w", p.Name, err)
+	}
+	p.APIKey = string(plain)
 	return p, nil
 }
 
