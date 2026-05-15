@@ -28,11 +28,12 @@ import (
 // Cross-protocol calls (e.g. Anthropic inbound + provider-only-OpenAI)
 // currently return 501 until Task 2b IR translation lands.
 type Server struct {
-	auth   *Auth
-	store  *store.Store
-	router *router.Router
-	quota  *QuotaMW
-	mux    *http.ServeMux
+	auth    *Auth
+	store   *store.Store
+	router  *router.Router
+	quota   *QuotaMW
+	mux     *http.ServeMux
+	monitor *monitoring
 }
 
 // NewServer wires auth + (optional) store-driven routing. Pass nil for
@@ -61,6 +62,7 @@ func NewServer(token string, s *store.Store) *Server {
 	srv.mux.HandleFunc("/v1/chat/completions", srv.dispatchOpenAI)
 	srv.mux.HandleFunc("/v1/messages", srv.dispatchAnthropic)
 	srv.mux.HandleFunc("/v1/models", srv.handleModels)
+	srv.mountMonitoring()
 	return srv
 }
 
@@ -116,6 +118,7 @@ func (s *Server) dispatchAnthropic(w http.ResponseWriter, r *http.Request) {
 // route, no alias rewrite), the original body bytes are forwarded verbatim.
 // Only when an alias remaps the model does the body get re-encoded.
 func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protocol string) {
+	s.monitor.IncRequests()
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeStructuredError(w, http.StatusBadRequest, "body_read_error", err.Error(),
