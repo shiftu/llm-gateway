@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -14,7 +15,8 @@ import (
 // QuotaMW enforces per-request quotas after auth.
 //
 // Check order (fail-fast, cheapest first):
-//  1. Minute RPM bucket (in-memory per api_key prefix)
+//  1. Minute RPM bucket (in-memory by default; SQLite-backed when
+//     LLM_GATEWAY_PERSIST_RPM=1 for crash-safe persistence)
 //  2. Month request cap (best-effort SQLite SUM — not atomic)
 //  3. Day request cap (atomic SQLite UPDATE-RETURNING via ReserveQuota;
 //     over-limit triggers a compensating −1 decrement)
@@ -23,9 +25,10 @@ import (
 // ("team", ak.TeamID). If neither is configured for a window → unlimited.
 // Legacy __legacy__ tokens bypass all quota checks.
 type QuotaMW struct {
-	st  *store.Store
-	mu  sync.Mutex
-	rpm map[string]*rpmSlot // key: api_key.ID
+	st         *store.Store
+	mu         sync.Mutex
+	rpm        map[string]*rpmSlot // key: api_key.ID (only used when persistRPM=false)
+	persistRPM bool                // true when LLM_GATEWAY_PERSIST_RPM=1
 }
 
 type rpmSlot struct {
@@ -34,8 +37,10 @@ type rpmSlot struct {
 }
 
 // NewQuotaMW creates a new quota middleware backed by the given store.
+// Reads LLM_GATEWAY_PERSIST_RPM env on creation; value is immutable after.
 func NewQuotaMW(st *store.Store) *QuotaMW {
-	return &QuotaMW{st: st, rpm: make(map[string]*rpmSlot)}
+	persist := os.Getenv("LLM_GATEWAY_PERSIST_RPM") == "1"
+	return &QuotaMW{st: st, rpm: make(map[string]*rpmSlot), persistRPM: persist}
 }
 
 // Middleware returns an http.Handler that enforces quotas before calling next.
@@ -56,7 +61,7 @@ func (q *QuotaMW) Middleware(next http.Handler) http.Handler {
 
 		now := time.Now().UTC()
 
-		// 1. Minute RPM (in-memory).
+		// 1. Minute RPM.
 		if quota, found := q.findQuota(ak, "minute"); found && quota.MaxRequests != nil {
 			if exceeded := q.checkRPM(ak.ID, *quota.MaxRequests, now); exceeded {
 				writeQuotaError(w, "minute", *quota.MaxRequests)
@@ -107,9 +112,26 @@ func (q *QuotaMW) findQuota(ak store.APIKey, window string) (store.Quota, bool) 
 	return store.Quota{}, false
 }
 
-// checkRPM atomically checks and increments the in-memory RPM counter.
+// checkRPM atomically checks and increments the RPM counter.
+// When persistRPM is true, uses SQLite-backed rpm_buckets (survives restarts).
+// When false, uses in-memory map (v0.1 default, zero overhead).
 // Returns true if the limit is exceeded (request should be rejected).
 func (q *QuotaMW) checkRPM(keyID string, limit int64, now time.Time) bool {
+	if q.persistRPM {
+		minute := now.UTC().Unix() / 60
+		count, err := q.st.GetAndIncrementRPM(keyID, minute)
+		if err != nil {
+			// Fallback to in-memory on DB error so a transient SQLite issue
+			// doesn't disable rate limiting entirely.
+			return q.checkRPMInMemory(keyID, limit, now)
+		}
+		return count > limit
+	}
+	return q.checkRPMInMemory(keyID, limit, now)
+}
+
+// checkRPMInMemory is the original in-memory RPM check.
+func (q *QuotaMW) checkRPMInMemory(keyID string, limit int64, now time.Time) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	slot, ok := q.rpm[keyID]

@@ -261,3 +261,55 @@ func TestQuotaMW_MonthQuota_Enforced(t *testing.T) {
 		t.Errorf("want 429 on month quota exceed, got %d", w.Code)
 	}
 }
+
+// --- SQLite-backed RPM persistence (LLM_GATEWAY_PERSIST_RPM=1) ---
+
+func TestQuotaMW_PersistRPM_Enforced(t *testing.T) {
+	st := openQuotaStore(t)
+	q := NewQuotaMW(st)
+	q.persistRPM = true // enable SQLite-backed RPM
+
+	ak := issueTestKey(t, st, "persist-rpm")
+
+	limit := int64(2)
+	_ = st.SetQuota(store.Quota{ScopeKind: "key", ScopeID: ak.ID, Window: "minute", MaxRequests: &limit})
+
+	// Two requests should pass.
+	for i := range 2 {
+		w := httptest.NewRecorder()
+		q.Middleware(passHandler).ServeHTTP(w, quotaRequest(ak))
+		if w.Code != http.StatusOK {
+			t.Errorf("request %d: want 200, got %d", i+1, w.Code)
+		}
+	}
+
+	// Third request should be rejected.
+	w := httptest.NewRecorder()
+	q.Middleware(passHandler).ServeHTTP(w, quotaRequest(ak))
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("want 429 on RPM exceed (persist mode), got %d", w.Code)
+	}
+}
+
+func TestQuotaMW_PersistRPM_DBErrorGracelfullyHandled(t *testing.T) {
+	// When persistRPM=true and the DB is closed, GetAndIncrementRPM fails.
+	// The middleware falls back to in-memory RPM tracking for that key.
+	// Since findQuota also fails (DB closed), no quota is found → pass-through.
+	// This is acceptable: a closed DB means no quota enforcement at all,
+	// consistent with how day/month quotas also silently pass through on DB errors.
+	st := openQuotaStore(t)
+	q := NewQuotaMW(st)
+	q.persistRPM = true
+
+	fakeKey := store.APIKey{ID: "fake-key-dberr", TeamID: ""}
+	_ = st.Close()
+
+	// All requests pass through when DB is closed — no quota config loaded.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	r = r.WithContext(authpkg.NewContext(r.Context(), fakeKey))
+	q.Middleware(passHandler).ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("closed DB: want 200 (no quota loaded), got %d", w.Code)
+	}
+}

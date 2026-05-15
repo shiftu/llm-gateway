@@ -246,6 +246,13 @@ var migrations = []string{
 	  ip_address  TEXT
 	);
 	CREATE INDEX idx_audit_ts ON admin_audit(ts DESC);
+
+	CREATE TABLE IF NOT EXISTS rpm_buckets (
+	  api_key_id    TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+	  minute_utc    INTEGER NOT NULL,
+	  request_count INTEGER NOT NULL DEFAULT 0,
+	  PRIMARY KEY (api_key_id, minute_utc)
+	);
 	`,
 }
 
