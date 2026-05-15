@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	authpkg "github.com/panda/llm-gateway/internal/auth"
 )
@@ -24,31 +25,38 @@ var scopeRank = map[string]int{
 var registry = map[string]string{
 	"ping": "",
 
-	// T8: provider + alias tools
+	// provider + alias tools
 	"add_provider":         "mcp_admin",
 	"remove_provider":      "mcp_admin",
-	"list_providers":       "mcp_admin",
+	"list_providers":       "mcp_auditor",
 	"set_default_provider": "mcp_admin",
 	"set_model_alias":      "mcp_admin",
 	"delete_model_alias":   "mcp_admin",
-	"list_model_aliases":   "mcp_admin",
+	"list_model_aliases":   "mcp_auditor",
 	"set_model_cost":       "mcp_admin",
-	"list_model_costs":     "mcp_admin",
+	"list_model_costs":     "mcp_auditor",
 
-	// T9: tenancy tools
+	// tenancy tools
 	"add_team":        "mcp_super",
-	"list_teams":      "mcp_admin",
+	"list_teams":      "mcp_auditor",
 	"issue_api_key":   "mcp_super",
 	"revoke_api_key":  "mcp_super",
-	"list_api_keys":   "mcp_admin",
+	"list_api_keys":   "mcp_auditor",
 	"set_quota":       "mcp_super",
-	"get_quota":       "mcp_admin",
-	"list_quotas":     "mcp_admin",
-	"list_request_logs": "mcp_admin",
+	"get_quota":       "mcp_auditor",
+	"list_quotas":     "mcp_auditor",
+	"list_request_logs": "mcp_auditor",
 
 	"set_team_model_alias":    "mcp_admin",
 	"delete_team_model_alias": "mcp_admin",
-	"list_team_model_aliases": "mcp_admin",
+	"list_team_model_aliases": "mcp_auditor",
+
+	// Audit tools
+	"list_audit_logs": "mcp_auditor",
+	"prune_audit_log": "mcp_admin",
+
+	// Identity tool
+	"whoami": "mcp_auditor",
 }
 
 var (
@@ -81,10 +89,23 @@ func requireRole(ctx context.Context, minScope string) error {
 
 // checkTool looks up toolName in the registry and delegates to requireRole.
 // Returns ErrUnknownTool for tools with no registry entry.
+// When the caller holds mcp_auditor scope and the tool requires higher,
+// returns a detailed, actionable error.
 func checkTool(ctx context.Context, toolName string) error {
 	minScope, ok := registry[toolName]
 	if !ok {
 		return ErrUnknownTool
 	}
-	return requireRole(ctx, minScope)
+	err := requireRole(ctx, minScope)
+	if err != nil && errors.Is(err, ErrPermissionDenied) {
+		// Produce a more helpful error for auditor-scope callers.
+		ak, akOK := authpkg.APIKeyFromContext(ctx)
+		if akOK && ak.Scope == "mcp_auditor" {
+			return fmt.Errorf(
+				"permission denied: %s requires scope=%s, your_scope=mcp_auditor (read-only). Contact your super admin to escalate",
+				toolName, minScope,
+			)
+		}
+	}
+	return err
 }

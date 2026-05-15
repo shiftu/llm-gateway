@@ -10,6 +10,7 @@ import (
 
 	authpkg "github.com/panda/llm-gateway/internal/auth"
 	"github.com/panda/llm-gateway/internal/store"
+	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
 func ctxWithScope(scope string) context.Context {
@@ -113,6 +114,101 @@ func TestBuild_Compiles_And_HasPing(t *testing.T) {
 	if s == nil {
 		t.Fatal("Build() returned nil")
 	}
-	// Verify ping is registered by checking we can call it without error.
-	// (We trust mcp-go to error on missing tools; no reflection needed.)
+}
+
+// --- T7: auditor scope read-only filter ---
+
+func TestCheckTool_Auditor_GetsDetailedDeniedMessage(t *testing.T) {
+	// Auditor calling a write tool should get a message with scope details.
+	err := checkTool(ctxWithScope("mcp_auditor"), "add_provider")
+	if err == nil {
+		t.Fatal("auditor should be denied add_provider")
+	}
+	errMsg := err.Error()
+	if !contains(errMsg, "your_scope=mcp_auditor") {
+		t.Errorf("error should mention auditor scope, got: %s", errMsg)
+	}
+	if !contains(errMsg, "mcp_admin") {
+		t.Errorf("error should mention required scope mcp_admin, got: %s", errMsg)
+	}
+}
+
+func TestCheckTool_Auditor_ReadTools_Pass(t *testing.T) {
+	readTools := []string{
+		"list_providers", "list_model_aliases", "list_model_costs",
+		"list_teams", "list_api_keys",
+		"get_quota", "list_quotas", "list_request_logs",
+		"list_team_model_aliases", "list_audit_logs",
+		"whoami",
+	}
+	for _, tool := range readTools {
+		if err := checkTool(ctxWithScope("mcp_auditor"), tool); err != nil {
+			t.Errorf("auditor should pass %s, got %v", tool, err)
+		}
+	}
+}
+
+func TestCheckTool_Auditor_WriteTools_Denied(t *testing.T) {
+	writeTools := []string{
+		"add_provider", "remove_provider", "set_default_provider",
+		"set_model_alias", "delete_model_alias",
+		"set_model_cost",
+		"add_team", "issue_api_key", "revoke_api_key",
+		"set_quota",
+		"set_team_model_alias", "delete_team_model_alias",
+		"prune_audit_log",
+	}
+	for _, tool := range writeTools {
+		err := checkTool(ctxWithScope("mcp_auditor"), tool)
+		if err == nil {
+			t.Errorf("auditor should be denied %s", tool)
+		}
+	}
+}
+
+func TestAuditorToolFilter_AuditorScope_OnlySeesReadOnly(t *testing.T) {
+	filter := AuditorToolFilter()
+	allTools := []mcplib.Tool{
+		{Name: "ping"},
+		{Name: "whoami"},
+		{Name: "list_teams"},
+		{Name: "add_provider"},
+		{Name: "set_quota"},
+		{Name: "list_audit_logs"},
+	}
+
+	// Non-auditor sees all
+	nonAuditorCtx := ctxWithScope("mcp_admin")
+	filtered := filter(nonAuditorCtx, allTools)
+	if len(filtered) != len(allTools) {
+		t.Errorf("non-auditor should see all %d tools, got %d", len(allTools), len(filtered))
+	}
+
+	// Auditor sees only read-only
+	auditorCtx := ctxWithScope("mcp_auditor")
+	filtered = filter(auditorCtx, allTools)
+	if len(filtered) != 4 {
+		t.Errorf("auditor should see 4 read-only tools, got %d: %v", len(filtered), toolNames(filtered))
+	}
+}
+
+func toolNames(tools []mcplib.Tool) []string {
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	return names
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
+}
+
+func containsSubstr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

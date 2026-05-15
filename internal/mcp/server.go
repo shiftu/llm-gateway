@@ -26,6 +26,7 @@ func Build() *mcpserver.MCPServer {
 		"llm-gateway",
 		gatewayVersion,
 		mcpserver.WithToolCapabilities(false),
+		mcpserver.WithToolFilter(AuditorToolFilter()),
 	)
 	s.AddTool(
 		mcplib.NewTool("ping",
