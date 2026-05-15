@@ -48,6 +48,7 @@ func runMCPServe() int {
 	s := lgwmcp.Build()
 	lgwmcp.RegisterProviderTools(s, st)
 	lgwmcp.RegisterTenancyTools(s, st)
+	lgwmcp.RegisterRoutingTools(s, st)
 
 	stdio := mcpserver.NewStdioServer(s)
 	stdio.SetContextFunc(lgwmcp.MakeContextFunc(token, st, cache))

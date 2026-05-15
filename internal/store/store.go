@@ -24,15 +24,10 @@ import (
 )
 
 const (
-	// schemaVersion = 1: a single migration produces the final shape. The
-	// v0.1 rebuild went through an internal v1→v2→v3 history (single-tenant
-	// → multi-tenant with composite-PK rename → context_length columns).
-	// Those incremental steps were collapsed once the only deployed DB had
-	// reached v3; that DB sits at user_version=3 and `v >= schemaVersion`
-	// (3 >= 1) makes applyMigrations a no-op there, so its data is
-	// preserved. Fresh DBs run the single migration straight to the final
-	// shape — no model_aliases_v2 rename dance, no ADD COLUMN chain.
-	schemaVersion           = 1
+	// schemaVersion = 2: v1 had all multi-tenant tables; v2 adds routing_rules
+	// and admin_audit. Existing DBs at user_version=1 get the v1→v2 migration;
+	// fresh DBs run both migrations in one transaction.
+	schemaVersion           = 2
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -220,6 +215,37 @@ var migrations = []string{
 	CREATE INDEX idx_logs_provider ON request_logs(provider_name);
 	CREATE INDEX idx_logs_team ON request_logs(team_id);
 	CREATE INDEX idx_logs_key ON request_logs(api_key_id);
+	`,
+
+	// v1 → v2: routing_rules + admin_audit
+	`
+	CREATE TABLE routing_rules (
+	  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	  team_id       TEXT REFERENCES teams(id) ON DELETE CASCADE,
+	  priority      INTEGER NOT NULL DEFAULT 0,
+	  match_field   TEXT NOT NULL DEFAULT 'model',
+	  match_op      TEXT NOT NULL DEFAULT 'prefix',
+	  match_value   TEXT NOT NULL,
+	  provider_name TEXT NOT NULL REFERENCES providers(name) ON DELETE CASCADE,
+	  upstream_model TEXT,
+	  is_active     INTEGER NOT NULL DEFAULT 1,
+	  created_at    INTEGER NOT NULL,
+	  CHECK (match_op IN ('prefix', 'equals', 'regex'))
+	);
+	CREATE INDEX idx_routing_rules_team ON routing_rules(team_id);
+
+	CREATE TABLE admin_audit (
+	  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	  ts          INTEGER NOT NULL,
+	  api_key_id  TEXT REFERENCES api_keys(id) ON DELETE SET NULL,
+	  team_id     TEXT,
+	  action      TEXT NOT NULL,
+	  target_type TEXT,
+	  target_id   TEXT,
+	  detail      TEXT,
+	  ip_address  TEXT
+	);
+	CREATE INDEX idx_audit_ts ON admin_audit(ts DESC);
 	`,
 }
 

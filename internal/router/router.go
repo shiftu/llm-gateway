@@ -1,20 +1,10 @@
-// Package router resolves an inbound model name into a concrete upstream
-// destination (Provider + upstream model name).
-//
-// Resolution rules (plan §4 Task 5):
-//   1. Alias hit       — alias.provider + alias.upstream_model
-//   2. Default provider — pass client model through unchanged
-//   3. Neither          — ErrNoRoute (caller surfaces F-DX-05 structured error)
-//
-// Per plan F-2 the router reads the store on every Resolve call — no
-// in-memory cache. Per F-3 the returned Route holds an immutable snapshot
-// of the Provider row so the caller can finish the request without racing
-// against MCP CRUD that mutates the underlying table.
 package router
 
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/panda/llm-gateway/internal/store"
 )
@@ -25,11 +15,13 @@ import (
 var ErrNoRoute = errors.New("router: no route for model — add an alias or set a default provider")
 
 // Route is a snapshot of the resolution decision. ViaAlias is populated when
-// the match came from model_aliases; empty for the default-provider path.
+// the match came from model_aliases; ViaRule when matched by a routing rule;
+// both empty for the default-provider path.
 type Route struct {
 	Provider      store.Provider
 	UpstreamModel string
 	ViaAlias      string
+	ViaRule       string
 }
 
 // Router resolves inbound model names against a Store. Cheap to construct;
@@ -42,7 +34,7 @@ type Router struct {
 func New(s *store.Store) *Router { return &Router{store: s} }
 
 // Resolve picks the upstream Provider + model for a client-requested model name.
-// Equivalent to ResolveForTeam with an empty teamID (global-only alias lookup).
+// Equivalent to ResolveForTeam with an empty teamID (global-only lookup).
 func (r *Router) Resolve(clientModel string) (Route, error) {
 	return r.ResolveForTeam(clientModel, "")
 }
@@ -50,8 +42,10 @@ func (r *Router) Resolve(clientModel string) (Route, error) {
 // ResolveForTeam resolves clientModel with team-aware priority:
 //  1. Team-scoped alias  (when teamID != "")
 //  2. Global alias       (team_id IS NULL)
-//  3. Global default provider (pass clientModel through)
+//  3. Routing rules      (team-scoped then global, by priority)
+//  4. Global default provider (pass clientModel through)
 func (r *Router) ResolveForTeam(clientModel, teamID string) (Route, error) {
+	// Tier 1: Alias hit
 	if alias, err := r.store.ResolveAliasForTeam(clientModel, teamID); err == nil {
 		p, perr := r.store.GetProvider(alias.ProviderName)
 		if perr != nil {
@@ -65,6 +59,14 @@ func (r *Router) ResolveForTeam(clientModel, teamID string) (Route, error) {
 		return Route{}, err
 	}
 
+	// Tier 2: Routing rules (conditional dispatch by model name or provider kind)
+	if route, ok, err := r.matchRoutingRules(clientModel, teamID); err != nil {
+		return Route{}, err
+	} else if ok {
+		return route, nil
+	}
+
+	// Tier 3: Default provider fallback
 	def, err := r.store.GetDefaultProvider()
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -73,4 +75,80 @@ func (r *Router) ResolveForTeam(clientModel, teamID string) (Route, error) {
 		return Route{}, err
 	}
 	return Route{Provider: def, UpstreamModel: clientModel}, nil
+}
+
+// matchRoutingRules evaluates active routing rules for the given team.
+// Returns (route, true, nil) on first match, (zero, false, nil) if no rule matches.
+func (r *Router) matchRoutingRules(clientModel, teamID string) (Route, bool, error) {
+	rules, err := r.store.MatchRoutingRules(teamID)
+	if err != nil {
+		return Route{}, false, err
+	}
+
+	// Load all providers once for kind-matching
+	providers, err := r.store.ListProviders()
+	if err != nil {
+		return Route{}, false, err
+	}
+	providerByKind := make(map[string][]store.Provider) // kind -> providers
+	for _, p := range providers {
+		providerByKind[p.Kind] = append(providerByKind[p.Kind], p)
+	}
+
+	for _, rule := range rules {
+		matched := false
+		switch rule.MatchField {
+		case "model":
+			matched = matchValue(rule.MatchOp, rule.MatchValue, clientModel)
+		case "kind":
+			// Match if any provider of this kind exists AND the rule's
+			// provider_name is one of those providers
+			if _, ok := providerByKind[rule.MatchValue]; ok {
+				matched = true
+			}
+		}
+
+		if !matched {
+			continue
+		}
+
+		// Resolve the rule's target provider
+		p, perr := r.store.GetProvider(rule.ProviderName)
+		if perr != nil {
+			if errors.Is(perr, store.ErrNotFound) {
+				continue // skip broken rule, try next
+			}
+			return Route{}, false, perr
+		}
+
+		upstream := clientModel
+		if rule.UpstreamModel != "" {
+			upstream = rule.UpstreamModel
+		}
+		return Route{Provider: p, UpstreamModel: upstream, ViaRule: ruleName(rule)}, true, nil
+	}
+
+	return Route{}, false, nil
+}
+
+// matchValue evaluates a match operation against a target string.
+func matchValue(op, pattern, target string) bool {
+	switch op {
+	case "equals":
+		return target == pattern
+	case "prefix":
+		return strings.HasPrefix(target, pattern)
+	case "regex":
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return false // invalid regex = no match
+		}
+		return re.MatchString(target)
+	default:
+		return false
+	}
+}
+
+func ruleName(r store.RoutingRule) string {
+	return fmt.Sprintf("rule#%d(%s/%s/%s)", r.ID, r.MatchField, r.MatchOp, r.MatchValue)
 }
