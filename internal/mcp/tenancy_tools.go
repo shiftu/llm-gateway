@@ -117,6 +117,25 @@ func RegisterTenancyTools(s *mcpserver.MCPServer, st *store.Store) {
 		),
 		listTeamModelAliasesHandler(st),
 	)
+
+	// Audit log tools (mcp_admin)
+	s.AddTool(
+		mcplib.NewTool("list_audit_logs",
+			mcplib.WithDescription("List admin audit log entries, newest first. Filterable by action and target type."),
+			mcplib.WithString("action", mcplib.Description("Filter by action name (e.g. 'add_provider', 'issue_api_key')")),
+			mcplib.WithString("target_type", mcplib.Description("Filter by target type (e.g. 'provider', 'team', 'api_key')")),
+			mcplib.WithNumber("limit", mcplib.Description("Max rows to return (default 100)")),
+			mcplib.WithNumber("offset", mcplib.Description("Pagination offset")),
+		),
+		listAuditLogsHandler(st),
+	)
+	s.AddTool(
+		mcplib.NewTool("prune_audit_log",
+			mcplib.WithDescription("Delete audit log entries older than N days. For operational safety only."),
+			mcplib.WithNumber("before_days", mcplib.Required(), mcplib.Description("Delete entries older than this many days (default 90)")),
+		),
+		pruneAuditLogHandler(st),
+	)
 }
 
 // --- handler factories ---
@@ -138,6 +157,7 @@ func addTeamHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			}
 			return mcplib.NewToolResultError("add_team failed: " + err.Error()), nil
 		}
+		audit(st, "add_team", "team", team.ID, map[string]string{"slug": team.Slug})
 		out, _ := json.Marshal(map[string]any{
 			"ok": true, "id": team.ID, "slug": team.Slug, "name": team.Name,
 		})
@@ -191,6 +211,7 @@ func issueAPIKeyHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 		if err != nil {
 			return mcplib.NewToolResultError("issue_api_key failed: " + err.Error()), nil
 		}
+		audit(st, "issue_api_key", "api_key", ak.ID, map[string]string{"scope": ak.Scope, "team_id": ak.TeamID})
 		out, _ := json.Marshal(map[string]any{
 			"ok":      true,
 			"key_id":  ak.ID,
@@ -219,6 +240,7 @@ func revokeAPIKeyHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			}
 			return mcplib.NewToolResultError("revoke_api_key failed: " + err.Error()), nil
 		}
+		audit(st, "revoke_api_key", "api_key", keyID, nil)
 		out, _ := json.Marshal(map[string]any{"ok": true, "revoked": keyID})
 		return mcplib.NewToolResultText(string(out)), nil
 	}
@@ -322,6 +344,7 @@ func setQuotaHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 		if err := st.SetQuota(q); err != nil {
 			return mcplib.NewToolResultError("set_quota failed: " + err.Error()), nil
 		}
+		audit(st, "set_quota", "quota", scopeKind+"/"+scopeID+"/"+window, nil)
 		out, _ := json.Marshal(map[string]any{
 			"ok": true, "scope_kind": scopeKind, "scope_id": scopeID, "window": window,
 		})
@@ -477,6 +500,7 @@ func setTeamModelAliasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 		if err := st.SetAliasForTeam(alias, team.ID, providerName, upstreamModel, contextLength, maxCompletionTokens); err != nil {
 			return mcplib.NewToolResultError("set_team_model_alias failed: " + err.Error()), nil
 		}
+		audit(st, "set_team_model_alias", "alias", teamSlug+"/"+alias, map[string]string{"provider": providerName})
 		out, _ := json.Marshal(map[string]any{
 			"ok": true, "team_slug": teamSlug, "alias": alias,
 			"provider_name": providerName, "upstream_model": upstreamModel,
@@ -508,6 +532,7 @@ func deleteTeamModelAliasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			}
 			return mcplib.NewToolResultError("delete_team_model_alias failed: " + err.Error()), nil
 		}
+		audit(st, "delete_team_model_alias", "alias", teamSlug+"/"+alias, nil)
 		out, _ := json.Marshal(map[string]any{"ok": true, "team_slug": teamSlug, "alias": alias})
 		return mcplib.NewToolResultText(string(out)), nil
 	}
@@ -573,4 +598,59 @@ func quotaRow(q store.Quota) map[string]any {
 		m["max_usd_micros"] = *q.MaxUSDMicros
 	}
 	return m
+}
+
+// --- Audit log MCP tools ---
+
+func listAuditLogsHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "list_audit_logs"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		f := store.AuditLogFilter{
+			Action:     req.GetString("action", ""),
+			TargetType: req.GetString("target_type", ""),
+			Limit:      req.GetInt("limit", 100),
+			Offset:     req.GetInt("offset", 0),
+		}
+		logs, err := st.ListAdminAuditLogs(f)
+		if err != nil {
+			return mcplib.NewToolResultError("list_audit_logs failed: " + err.Error()), nil
+		}
+		type row struct {
+			ID         int64  `json:"id"`
+			Ts         string `json:"ts"`
+			Action     string `json:"action"`
+			TargetType string `json:"target_type,omitempty"`
+			TargetID   string `json:"target_id,omitempty"`
+			Detail     string `json:"detail,omitempty"`
+		}
+		out := make([]row, len(logs))
+		for i, a := range logs {
+			out[i] = row{ID: a.ID, Ts: a.Ts.UTC().Format(time.RFC3339),
+				Action: a.Action, TargetType: a.TargetType,
+				TargetID: a.TargetID, Detail: a.Detail}
+		}
+		b, _ := json.Marshal(out)
+		return mcplib.NewToolResultText(string(b)), nil
+	}
+}
+
+func pruneAuditLogHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "prune_audit_log"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		beforeDays := req.GetInt("before_days", 90)
+		if beforeDays <= 0 {
+			return mcplib.NewToolResultError("before_days must be > 0"), nil
+		}
+		n, err := st.PruneAuditLog(beforeDays)
+		if err != nil {
+			return mcplib.NewToolResultError("prune_audit_log failed: " + err.Error()), nil
+		}
+		audit(st, "prune_audit_log", "admin_audit", fmt.Sprintf("before_%dd", beforeDays), map[string]int64{"deleted": n})
+		out, _ := json.Marshal(map[string]any{"ok": true, "deleted": n, "before_days": beforeDays})
+		return mcplib.NewToolResultText(string(out)), nil
+	}
 }

@@ -124,6 +124,7 @@ func addProviderHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 				return mcplib.NewToolResultError("provider added but set_default failed: " + err.Error()), nil
 			}
 		}
+		audit(st, "add_provider", "provider", name, map[string]string{"kind": kind})
 		out, _ := json.Marshal(map[string]any{"ok": true, "name": name})
 		return mcplib.NewToolResultText(string(out)), nil
 	}
@@ -144,6 +145,7 @@ func removeProviderHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			}
 			return mcplib.NewToolResultError("remove_provider failed: " + err.Error()), nil
 		}
+		audit(st, "remove_provider", "provider", name, nil)
 		out, _ := json.Marshal(map[string]any{"ok": true, "removed": name})
 		return mcplib.NewToolResultText(string(out)), nil
 	}
@@ -197,6 +199,7 @@ func setDefaultProviderHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			}
 			return mcplib.NewToolResultError("set_default_provider failed: " + err.Error()), nil
 		}
+		audit(st, "set_default_provider", "provider", name, nil)
 		out, _ := json.Marshal(map[string]any{"ok": true, "default": name})
 		return mcplib.NewToolResultText(string(out)), nil
 	}
@@ -218,6 +221,7 @@ func setModelAliasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 		if err := st.SetAlias(alias, providerName, upstreamModel, contextLength, maxCompletionTokens); err != nil {
 			return mcplib.NewToolResultError("set_model_alias failed: " + err.Error()), nil
 		}
+		audit(st, "set_model_alias", "alias", alias, map[string]string{"provider": providerName, "upstream_model": upstreamModel})
 		out, _ := json.Marshal(map[string]any{
 			"ok": true, "alias": alias,
 			"provider": providerName, "upstream_model": upstreamModel,
@@ -241,6 +245,7 @@ func deleteModelAliasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			}
 			return mcplib.NewToolResultError("delete_model_alias failed: " + err.Error()), nil
 		}
+		audit(st, "delete_model_alias", "alias", alias, nil)
 		out, _ := json.Marshal(map[string]any{"ok": true, "deleted": alias})
 		return mcplib.NewToolResultText(string(out)), nil
 	}
@@ -315,6 +320,7 @@ func setModelCostHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 		if err := st.SetModelCost(c); err != nil {
 			return mcplib.NewToolResultError("set_model_cost failed: " + err.Error()), nil
 		}
+		audit(st, "set_model_cost", "model_cost", provider+"/"+model, nil)
 		out, _ := json.Marshal(map[string]any{
 			"ok": true, "provider": provider, "model": model,
 			"usd_per_input_1k": inputRaw, "usd_per_output_1k": outputRaw,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/panda/llm-gateway/internal/store"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -77,6 +78,9 @@ func setRoutingRuleHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			return mcplib.NewToolResultError("set_routing_rule failed: " + err.Error()), nil
 		}
 
+		audit(st, "set_routing_rule", "routing_rule", fmt.Sprintf("rule#%d", rule.ID),
+			map[string]string{"match_field": rule.MatchField, "match_value": rule.MatchValue, "provider": rule.ProviderName})
+
 		out, _ := json.Marshal(map[string]any{
 			"ok":          true,
 			"id":          rule.ID,
@@ -104,6 +108,7 @@ func removeRoutingRuleHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			}
 			return mcplib.NewToolResultError("remove_routing_rule failed: " + err.Error()), nil
 		}
+		audit(st, "remove_routing_rule", "routing_rule", fmt.Sprintf("rule#%d", id), nil)
 		out, _ := json.Marshal(map[string]any{"ok": true, "deleted_id": id})
 		return mcplib.NewToolResultText(string(out)), nil
 	}
