@@ -24,10 +24,10 @@ import (
 )
 
 const (
-	// schemaVersion = 2: v1 had all multi-tenant tables; v2 adds routing_rules
+	// schemaVersion = 3: v3 adds routing_weights (v0.3 T2)
 	// and admin_audit. Existing DBs at user_version=1 get the v1→v2 migration;
 	// fresh DBs run both migrations in one transaction.
-	schemaVersion           = 2
+	schemaVersion           = 3
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -252,6 +252,18 @@ var migrations = []string{
 	  minute_utc    INTEGER NOT NULL,
 	  request_count INTEGER NOT NULL DEFAULT 0,
 	  PRIMARY KEY (api_key_id, minute_utc)
+	);
+	`,
+
+	// v2 → v3: routing_weights (v0.3 T2)
+	`
+	CREATE TABLE routing_weights (
+	  team_id    TEXT PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
+	  cost       REAL NOT NULL DEFAULT 0.4,
+	  latency    REAL NOT NULL DEFAULT 0.3,
+	  quality    REAL NOT NULL DEFAULT 0.2,
+	  health     REAL NOT NULL DEFAULT 0.1,
+	  updated_at INTEGER NOT NULL
 	);
 	`,
 }
