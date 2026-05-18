@@ -53,6 +53,7 @@ func runMCPServe() int {
 	lgwmcp.RegisterExplainTools(s, st)
 	lgwmcp.RegisterFallbackTools(s, st)
 	lgwmcp.RegisterCapabilityTools(s, st)
+	lgwmcp.RegisterResources(s, st)
 
 	stdio := mcpserver.NewStdioServer(s)
 	stdio.SetContextFunc(lgwmcp.MakeContextFunc(token, st, cache))
