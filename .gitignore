@@ -17,4 +17,6 @@ target/
 .gstack/
 .env.dev
 /llm-gateway
+llm-gateway-bin
+llm-gateway-linux-arm64
 *.test
