@@ -10,10 +10,33 @@ import (
 	"time"
 )
 
+// TestHealthz_NotReady: Q11 startup gate. Before MarkReady is called, the
+// server is still bootstrapping (probing providers) — /healthz must return
+// 503 with status=starting so orchestrators can distinguish "starting" from
+// "broken" and not route real traffic yet.
+func TestHealthz_NotReady(t *testing.T) {
+	s := NewServer("test-token", nil)
+	// Do NOT call MarkReady — simulate mid-bootstrap.
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 before MarkReady, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["status"] != "starting" {
+		t.Errorf("expected status=starting, got %v", resp["status"])
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	s := NewServer("test-token", nil)
-	// Need to bypass auth for healthz — mountMonitoring already registered in NewServer
-	handler := s.mux // raw mux, no auth middleware
+	s.MarkReady() // Q11: bootstrap is "done" for the purpose of this test
+	handler := s.mux
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()

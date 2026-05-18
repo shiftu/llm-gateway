@@ -81,6 +81,12 @@ func (s *Server) MountMCP(h http.Handler) {
 	s.mux.Handle("/mcp", h)
 }
 
+// MarkReady flips the /healthz readiness gate (Q11). Call after
+// Manager.Bootstrap completes — until then /healthz returns 503.
+func (s *Server) MarkReady() {
+	s.monitor.MarkReady()
+}
+
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
 	if s.quota != nil {

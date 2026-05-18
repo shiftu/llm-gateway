@@ -14,6 +14,7 @@ type monitoring struct {
 	enableMetrics bool
 	startTime     time.Time
 	requests      atomic.Int64 // total proxy requests
+	ready         atomic.Bool  // Q11 startup gate: flipped after Bootstrap returns
 }
 
 func newMonitoring() *monitoring {
@@ -35,15 +36,31 @@ func (s *Server) mountMonitoring() {
 	}
 }
 
-// handleHealthz returns 200 when the gateway is alive.
-// Returns JSON: {"status":"ok","uptime_seconds":N}
+// handleHealthz reports gateway readiness. Returns 503 + status=starting
+// while the Q11 startup probe sweep is still running, 200 + status=ok once
+// MarkReady has been called. Body always includes uptime so orchestrators
+// can detect stuck-starting processes.
 func (m *monitoring) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	resp := map[string]any{
-		"status":         "ok",
-		"uptime_seconds": int(time.Since(m.startTime).Seconds()),
+	status := "starting"
+	code := http.StatusServiceUnavailable
+	if m.ready.Load() {
+		status = "ok"
+		code = http.StatusOK
 	}
-	json.NewEncoder(w).Encode(resp)
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":         status,
+		"uptime_seconds": int(time.Since(m.startTime).Seconds()),
+	})
+}
+
+// MarkReady flips the readiness flag. Called by the start command after
+// Manager.Bootstrap completes (or its 10s deadline elapses).
+func (m *monitoring) MarkReady() {
+	if m != nil {
+		m.ready.Store(true)
+	}
 }
 
 // handleMetrics emits a minimal Prometheus text-format exposition.

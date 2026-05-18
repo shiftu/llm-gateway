@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/panda/llm-gateway/internal/encrypt"
+	"github.com/panda/llm-gateway/internal/health"
 	"github.com/panda/llm-gateway/internal/server"
 	"github.com/panda/llm-gateway/internal/store"
 )
@@ -72,6 +73,24 @@ func runStart() int {
 	srv.MountMCP(server.BuildMCPHandler(st))
 
 	printBanner(token, source, cfgDir, addr, st)
+
+	// v0.3 T1 Q11 startup gate: with LLM_GATEWAY_HEALTH_PROBES=1, probe every
+	// configured provider once (10s deadline) before flipping /healthz to 200.
+	// Then start the background loop. With the env unset, MarkReady fires
+	// immediately — health probes are opt-in for v0.3.0.
+	if os.Getenv("LLM_GATEWAY_HEALTH_PROBES") == "1" && st != nil {
+		mgr := health.NewManager(health.Probe, 30*time.Second)
+		if n, err := server.RegisterHealthTargets(mgr, st); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: could not register health targets: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "health: probing %d provider(s) at startup...\n", n)
+			bootCtx, bootCancel := context.WithTimeout(ctx, 10*time.Second)
+			_ = mgr.Bootstrap(bootCtx)
+			bootCancel()
+			go mgr.Run(ctx)
+		}
+	}
+	srv.MarkReady()
 
 	if err := srv.Run(ctx, addr); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
