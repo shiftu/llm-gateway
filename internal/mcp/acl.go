@@ -64,6 +64,9 @@ var registry = map[string]string{
 	// Routing-weights tools (v0.3 T2)
 	"set_routing_weights": "mcp_admin",
 	"get_routing_weights": "mcp_auditor",
+
+	// Explain trace (v0.3 T5)
+	"explain_route_trace": "mcp_auditor",
 }
 
 var (

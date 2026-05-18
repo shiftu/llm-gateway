@@ -60,19 +60,18 @@ func TestPruneAuditLog(t *testing.T) {
 	s.LogAdminAction("add_provider", "provider", "ds", nil)
 	s.LogAdminAction("issue_api_key", "api_key", "ak_1", nil)
 
-	n, err := s.PruneAuditLog(0) // prune nothing (0 days = future cutoff)
+	// beforeDays=365: cutoff is 1 year ago — recent entries must survive.
+	n, err := s.PruneAuditLog(365)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Since entries are very recent, 0 days should prune them
-	// Actually: beforeDays=0 means cutoff = now, which is after the entries
-	// so nothing should be pruned. Let's use 0 = prune older than 0 days = all
-	_ = n
+	if n != 0 {
+		t.Fatalf("expected 0 rows pruned with 365-day window, got %d", n)
+	}
 
-	// Verify entries exist
 	logs, _ := s.ListAdminAuditLogs(AuditLogFilter{Limit: 10})
 	if len(logs) != 2 {
-		t.Fatalf("expected 2 entries before prune, got %d", len(logs))
+		t.Fatalf("expected 2 entries after no-op prune, got %d", len(logs))
 	}
 }
 

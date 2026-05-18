@@ -50,6 +50,7 @@ func runMCPServe() int {
 	lgwmcp.RegisterTenancyTools(s, st)
 	lgwmcp.RegisterRoutingTools(s, st)
 	lgwmcp.RegisterWhoamiTool(s, st)
+	lgwmcp.RegisterExplainTools(s, st)
 
 	stdio := mcpserver.NewStdioServer(s)
 	stdio.SetContextFunc(lgwmcp.MakeContextFunc(token, st, cache))
