@@ -111,7 +111,7 @@ func (s *Store) ListAdminAuditLogs(f AuditLogFilter) ([]AdminAudit, error) {
 	if len(conditions) > 0 {
 		query += " WHERE " + joinConds(conditions, " AND ")
 	}
-	query += " ORDER BY ts DESC LIMIT ? OFFSET ?"
+	query += " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?"
 	args = append(args, f.Limit, f.Offset)
 
 	rows, err := s.db.Query(query, args...)
