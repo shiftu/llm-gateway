@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl-t14","object":"chat.completion.chunk","model":"moonshot-v1-8k","choices":[{"index":0,"delta":{"role":"assistant","content":"1"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-t14","object":"chat.completion.chunk","model":"moonshot-v1-8k","choices":[{"index":0,"delta":{"content":", 2"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-t14","object":"chat.completion.chunk","model":"moonshot-v1-8k","choices":[{"index":0,"delta":{"content":", 3"},"finish_reason":"stop"}]}
+
+data: [DONE]

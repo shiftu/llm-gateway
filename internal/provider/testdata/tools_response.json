@@ -1,0 +1,1 @@
+{"id":"chatcmpl-t14","object":"chat.completion","model":"qwen-turbo","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_t14","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":25,"completion_tokens":18,"total_tokens":43}}
