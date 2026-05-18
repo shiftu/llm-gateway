@@ -44,6 +44,24 @@ These were subagent recommendations the user (intentionally) declined at the fin
 - `set_routing_rule` MCP tool (advanced routing semantics)
 - Cost tracking ($ multiplication from token counts)
 
+## Deferred from v0.3 CEO review (2026-05-17)
+
+These were SELECTIVE EXPANSION candidates the user deliberately deferred. Documented so future-you can re-evaluate when conditions change.
+
+### EX-1 — Quality evals pipeline (per-team test prompts + golden answers + scoring)
+
+- **CEO argument:** T2 cognitive scoring writes `quality_score=1.0` as a placeholder. An evals pipeline would make quality a real signal — `routing_weights.quality > 0` would actually matter. Unblocks EX-13 (dynamic weight auto-adjust).
+- **Why deferred:** Evals is its own subsystem (per-team prompts? golden answers? LLM-as-judge? human review?). Deserves its own milestone where "what counts as a good answer" can be designed thoughtfully, not bolted onto v0.3 routing.
+- **Re-evaluate if:** Users start noticing the gateway picking measurably worse models (cheapest+fastest beats them on a task they care about). At that point the placeholder quality_score becomes a real complaint, and the evals pipeline becomes urgent. Likely v0.4 or v0.5 anchor.
+- **Effort:** ~1.5 工程日 / CC ~15 min once the design is locked. The design work is the hard part.
+
+### EX-7 — MCP resource subscriptions (push notifications, not just polling)
+
+- **CEO argument:** T9 ships read-only `lgw://` resources that agents pull. MCP spec includes `subscribe` so agents can be notified when, e.g., `lgw://teams/X/cost` crosses 80% budget. Push beats poll for reactive agent infrastructure.
+- **Why deferred:** Polling at 5s in a single-user/single-team scenario is perfectly adequate; subscribe needs a server→agent push channel (Streamable HTTP has notifications; stdio needs the notification side of mcp-go). The MCP `subscribe` semantics are also still evolving — don't lock in early. Let T9 resources stabilize first.
+- **Re-evaluate if:** Real alert use cases emerge (budget breach, audit anomaly, provider going dark) where polling latency is unacceptable; or if a second user/team starts running multiple agents off the same gateway and polling load matters.
+- **Effort:** ~0.85 工程日 / CC ~10 min on top of T9.
+
 ## Open Questions Still Open
 
 From plan §6, items not yet resolved during autoplan:
