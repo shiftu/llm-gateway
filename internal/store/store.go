@@ -24,10 +24,11 @@ import (
 )
 
 const (
-	// schemaVersion = 7: v7 adds provider_capabilities table (v0.3 T11).
+	// schemaVersion = 8: v8 adds admin_audit hash chain columns (v0.3 T22).
+	// v7 added provider_capabilities (v0.3 T11).
 	// v6 added fallback_policies (v0.3 T4).
 	// v5 added request_logs.route_trace (v0.3 T5).
-	schemaVersion           = 7
+	schemaVersion           = 8
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -302,6 +303,12 @@ var migrations = []string{
 	  UNIQUE(provider_name, capability)
 	);
 	`,
+
+	// v7 → v8: admin_audit hash chain (v0.3 T22)
+	`
+ALTER TABLE admin_audit ADD COLUMN prev_hash TEXT;
+ALTER TABLE admin_audit ADD COLUMN entry_hash TEXT;
+`,
 }
 
 // applyMigrations brings the DB schema up to schemaVersion in a single

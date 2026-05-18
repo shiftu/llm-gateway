@@ -76,6 +76,9 @@ var registry = map[string]string{
 	// Provider capability registry (v0.3 T11)
 	"set_provider_capability":    "mcp_admin",
 	"list_provider_capabilities": "mcp_auditor",
+
+	// Audit chain verification (v0.3 T22)
+	"verify_audit_chain": "mcp_auditor",
 }
 
 var (
