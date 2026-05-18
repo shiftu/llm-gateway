@@ -214,6 +214,7 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		PromptTokens:     u.InputTokens,
 		CompletionTokens: u.OutputTokens,
 		TotalTokens:      u.InputTokens + u.OutputTokens + u.ReasoningTokens,
+		RouteTrace:       marshalCognitiveTrace(route.Cognitive),
 	}
 	if hasKey {
 		rl.APIKeyID = ak.ID
@@ -370,4 +371,14 @@ func writeStructuredError(w http.ResponseWriter, status int, kind, msg, fix stri
 			"fix":     fix,
 		},
 	})
+}
+
+// marshalCognitiveTrace serialises a CognitiveTrace to JSON for storage in
+// request_logs.route_trace. Returns empty string for static (no-candidate) routes.
+func marshalCognitiveTrace(ct router.CognitiveTrace) string {
+	if len(ct.Candidates) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(ct)
+	return string(b)
 }
