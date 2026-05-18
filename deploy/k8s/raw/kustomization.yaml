@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Apply with: kubectl apply -k deploy/k8s/raw/
+# Or preview: kustomize build deploy/k8s/raw/ | kubectl apply -f -
+#
+# Before applying:
+#   1. Edit secret.yaml — replace the placeholder token with: echo -n 'YOUR_TOKEN' | base64
+#   2. Optionally edit pvc.yaml to set a specific storageClassName
+#   3. Optionally edit deployment.yaml to pin the image tag
+
+resources:
+  - namespace.yaml
+  - secret.yaml
+  - pvc.yaml
+  - service.yaml
+  - deployment.yaml

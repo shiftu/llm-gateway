@@ -1,0 +1,89 @@
+# Number of replicas. Keep at 1 — SQLite WAL does not support concurrent writers.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/shiftu/llm-gateway
+  pullPolicy: IfNotPresent
+  # Overrides the image tag; defaults to Chart.appVersion when empty.
+  tag: ""
+
+service:
+  type: ClusterIP
+  port: 7421
+
+persistence:
+  enabled: true
+  # Storage class name. Empty string uses the cluster default.
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  # retainPolicy: Retain keeps PVC data when the chart is uninstalled.
+  # This is advisory — it is recorded as an annotation on the PVC.
+  retainPolicy: Retain
+
+# Authentication token for the gateway.
+# Exactly one of token or existingSecret must be set.
+auth:
+  # Plaintext token value. A Secret will be created from this.
+  token: ""
+  # Name of a pre-existing Secret that contains the token.
+  existingSecret: ""
+  # Key within existingSecret that holds the token value.
+  existingSecretKey: LLM_GATEWAY_TOKEN
+
+# Master encryption key used to encrypt provider API keys at rest.
+# Optional but strongly recommended for production.
+masterKey:
+  # Plaintext key value. A Secret will be created from this.
+  value: ""
+  # Name of a pre-existing Secret that contains the master key.
+  existingSecret: ""
+  # Key within existingSecret that holds the master key value.
+  existingSecretKey: LLM_GATEWAY_MASTER_KEY
+
+# Seed a single provider via environment variables (optional shortcut).
+# Leave all fields empty to skip provider seeding.
+provider:
+  # Display name for the provider (e.g. "openai").
+  name: ""
+  # Provider kind: openai | anthropic | deepseek | qwen | moonshot | gemini | xai
+  kind: ""
+  # API key for the provider.
+  apiKey: ""
+  # Custom OpenAI-compatible base URL (optional).
+  openaiBaseURL: ""
+  # Custom Anthropic-compatible base URL (optional).
+  anthropicBaseURL: ""
+
+healthProbes:
+  # Set to true and ensure LLM_GATEWAY_HEALTH_PROBES=1 is accepted by the binary.
+  # When false, liveness/readiness probes are omitted from the Deployment.
+  enabled: false
+
+# Resource requests and limits for the gateway container.
+resources: {}
+# Example:
+#   limits:
+#     cpu: 500m
+#     memory: 256Mi
+#   requests:
+#     cpu: 100m
+#     memory: 128Mi
+
+# Node selector for pod scheduling.
+nodeSelector: {}
+
+# Tolerations for pod scheduling.
+tolerations: []
+
+# Affinity rules for pod scheduling.
+affinity: {}
+
+# Annotations added to the pod template.
+podAnnotations: {}
+
+# Security context applied to the pod.
+podSecurityContext: {}
+
+# Security context applied to the gateway container.
+securityContext: {}

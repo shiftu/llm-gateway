@@ -1,0 +1,13 @@
+llm-gateway {{ .Chart.AppVersion }} deployed.
+
+Access the gateway:
+  kubectl port-forward svc/{{ include "llm-gateway.fullname" . }} 7421:7421
+
+Test:
+  curl http://localhost:7421/healthz
+
+Retrieve your token:
+  kubectl get secret {{ include "llm-gateway.fullname" . }}-auth -o jsonpath='{.data.LLM_GATEWAY_TOKEN}' | base64 -d
+
+MCP endpoint:
+  http://localhost:7421/mcp

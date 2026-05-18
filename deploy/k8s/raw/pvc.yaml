@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-gateway-data
+  namespace: llm-gateway
+  labels:
+    app.kubernetes.io/name: llm-gateway
+    app.kubernetes.io/managed-by: kustomize
+  annotations:
+    # Intent: set the PV's reclaimPolicy to Retain in your StorageClass, or patch
+    # the PV after provisioning, to prevent data loss when this PVC is deleted.
+    llm-gateway/retain-policy: Retain
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: standard  # Uncomment and set to your cluster's StorageClass

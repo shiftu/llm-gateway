@@ -1,0 +1,6 @@
+apiVersion: v2
+name: llm-gateway
+description: AI-native LLM proxy gateway
+type: application
+version: 0.3.0
+appVersion: "0.3.0"

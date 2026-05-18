@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "llm-gateway.fullname" . }}
+  labels:
+    {{- include "llm-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Recreate strategy required: SQLite WAL does not support concurrent writers.
+  # Two pods would both open state.db and corrupt the WAL journal.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "llm-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "llm-gateway.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: llm-gateway
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ include "llm-gateway.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - start
+          ports:
+            - name: http
+              containerPort: 7421
+              protocol: TCP
+          env:
+            # Config dir: state.db and master.key are stored here.
+            - name: XDG_CONFIG_HOME
+              value: /data
+            # Auth token — sourced from a Secret.
+            - name: LLM_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "llm-gateway.authSecretName" . }}
+                  key: {{ include "llm-gateway.authSecretKey" . }}
+            {{- if or .Values.masterKey.value .Values.masterKey.existingSecret }}
+            # Master key for encrypting provider API keys at rest.
+            - name: LLM_GATEWAY_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "llm-gateway.masterKeySecretName" . }}
+                  key: {{ include "llm-gateway.masterKeySecretKey" . }}
+            {{- end }}
+            {{- if .Values.healthProbes.enabled }}
+            # Signal to the binary that health probes are active.
+            - name: LLM_GATEWAY_HEALTH_PROBES
+              value: "1"
+            {{- end }}
+            {{- if .Values.provider.name }}
+            - name: LLM_GATEWAY_PROVIDER_NAME
+              value: {{ .Values.provider.name | quote }}
+            {{- end }}
+            {{- if .Values.provider.kind }}
+            - name: LLM_GATEWAY_PROVIDER_KIND
+              value: {{ .Values.provider.kind | quote }}
+            {{- end }}
+            {{- if .Values.provider.apiKey }}
+            - name: LLM_GATEWAY_PROVIDER_API_KEY
+              value: {{ .Values.provider.apiKey | quote }}
+            {{- end }}
+            {{- if .Values.provider.openaiBaseURL }}
+            - name: LLM_GATEWAY_PROVIDER_OPENAI_BASE_URL
+              value: {{ .Values.provider.openaiBaseURL | quote }}
+            {{- end }}
+            {{- if .Values.provider.anthropicBaseURL }}
+            - name: LLM_GATEWAY_PROVIDER_ANTHROPIC_BASE_URL
+              value: {{ .Values.provider.anthropicBaseURL | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          {{- if .Values.healthProbes.enabled }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            # 503 during bootstrap keeps pod NotReady until gateway is fully initialized.
+            failureThreshold: 3
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "llm-gateway.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
