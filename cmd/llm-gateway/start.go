@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -52,14 +53,28 @@ func runStart() int {
 		defer st.Close()
 	}
 
-	// Inject encryption for provider API keys
-	mk, mkErr := encrypt.NewFromEnvOrFile(cfgDir)
-	if mkErr == nil {
-		st.SetEncryptor(mk)
+	// T17 multi-key: if KEK is set, load active master key from DB.
+	// Otherwise fall back to env/file single-key (v0.1 compat).
+	kekStr := os.Getenv("LLM_GATEWAY_KEK")
+	if kekStr != "" && st != nil {
+		kek := encrypt.NewKEKFromString(kekStr)
+		if activeMK, err := st.GetActiveMasterKey(kek); err == nil {
+			st.SetEncryptor(activeMK)
+		} else if errors.Is(err, store.ErrNotFound) {
+			// No keys in DB yet — fall through to file/env key
+			if mk, mkErr := encrypt.NewFromEnvOrFile(cfgDir); mkErr == nil {
+				st.SetEncryptor(mk)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "warn: could not load active master key from DB: %v\n", err)
+		}
 	} else {
-		// No master key — check if any provider keys are already encrypted
-		// (would be unreadable). Warn but don't crash for v0.1 compat.
-		fmt.Fprintf(os.Stderr, "note: no master key — provider API keys stored plaintext\n")
+		mk, mkErr := encrypt.NewFromEnvOrFile(cfgDir)
+		if mkErr == nil {
+			st.SetEncryptor(mk)
+		} else {
+			fmt.Fprintf(os.Stderr, "note: no master key — provider API keys stored plaintext\n")
+		}
 	}
 	if err := seedProviderFromEnv(st); err != nil {
 		fmt.Fprintf(os.Stderr, "could not seed provider from env: %v\n", err)
