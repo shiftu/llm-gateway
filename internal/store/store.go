@@ -24,11 +24,13 @@ import (
 )
 
 const (
-	// schemaVersion = 8: v8 adds admin_audit hash chain columns (v0.3 T22).
+	// schemaVersion = 10: v10 adds master_keys table (v0.3 T17).
+	// v9 added budgets table (v0.3 T16).
+	// v8 added admin_audit hash chain columns (v0.3 T22).
 	// v7 added provider_capabilities (v0.3 T11).
 	// v6 added fallback_policies (v0.3 T4).
 	// v5 added request_logs.route_trace (v0.3 T5).
-	schemaVersion           = 8
+	schemaVersion           = 10
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -308,6 +310,32 @@ var migrations = []string{
 	`
 ALTER TABLE admin_audit ADD COLUMN prev_hash TEXT;
 ALTER TABLE admin_audit ADD COLUMN entry_hash TEXT;
+`,
+
+	// v8 → v9: budgets table (v0.3 T16)
+	`
+CREATE TABLE IF NOT EXISTS budgets (
+  team_id            TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  period             TEXT NOT NULL,
+  usd_limit          REAL NOT NULL,
+  soft_threshold_pct INTEGER NOT NULL DEFAULT 80,
+  hard_cap_action    TEXT NOT NULL DEFAULT 'block',
+  updated_at         INTEGER NOT NULL,
+  PRIMARY KEY (team_id, period),
+  CHECK (period IN ('day','month')),
+  CHECK (hard_cap_action IN ('warn','block'))
+);
+`,
+
+	// v9 → v10: master_keys table (v0.3 T17)
+	`
+CREATE TABLE IF NOT EXISTS master_keys (
+  id           TEXT PRIMARY KEY,
+  key_enc_b64  TEXT NOT NULL,
+  label        TEXT,
+  created_at   INTEGER NOT NULL,
+  retired_at   INTEGER
+);
 `,
 }
 

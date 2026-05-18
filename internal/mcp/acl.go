@@ -79,6 +79,17 @@ var registry = map[string]string{
 
 	// Audit chain verification (v0.3 T22)
 	"verify_audit_chain": "mcp_auditor",
+
+	// Per-team budget limits (v0.3 T16)
+	"set_budget":    "mcp_admin",
+	"check_budget":  "mcp_auditor",
+	"list_budgets":  "mcp_auditor",
+
+	// Master key management (v0.3 T17)
+	"rotate_master_key": "mcp_super",
+	"rekey_providers":   "mcp_super",
+	"retire_master_key": "mcp_super",
+	"list_master_keys":  "mcp_super",
 }
 
 var (

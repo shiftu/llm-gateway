@@ -32,6 +32,7 @@ type Server struct {
 	store   *store.Store
 	router  *router.Router
 	quota   *QuotaMW
+	budget  *BudgetMW
 	mux     *http.ServeMux
 	monitor *monitoring
 }
@@ -58,6 +59,7 @@ func NewServer(token string, s *store.Store) *Server {
 	if s != nil {
 		srv.router = router.New(s)
 		srv.quota = NewQuotaMW(s)
+		srv.budget = NewBudgetMW(s)
 	}
 	srv.mux.HandleFunc("/v1/chat/completions", srv.dispatchOpenAI)
 	srv.mux.HandleFunc("/v1/messages", srv.dispatchAnthropic)
@@ -89,6 +91,9 @@ func (s *Server) MarkReady() {
 
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
+	if s.budget != nil {
+		h = s.budget.Middleware(h)
+	}
 	if s.quota != nil {
 		h = s.quota.Middleware(h)
 	}
