@@ -52,6 +52,12 @@ func NewAuthWithStore(legacyToken string, st *store.Store, cache *authpkg.KeyCac
 //  4. Otherwise → 401 invalid_credentials
 func (a *Auth) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Public paths: skip auth for health checks and metrics scrapers.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		provided, ok := extractCredentials(r)
 		if !ok {
 			writeAuthError(w, "missing_credentials",

@@ -26,6 +26,8 @@ func run(args []string) int {
 		return runMCPServe()
 	case "mcp-config":
 		return runMCPConfig(args[1:])
+	case "health":
+		return runHealth(args[1:])
 	case "version", "-v", "--version":
 		fmt.Println("llm-gateway", version)
 		return 0
@@ -49,6 +51,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  mcp-serve     Run the MCP stdio server (wire this into your AI agent client config)")
 	fmt.Fprintln(os.Stderr, "  mcp-config    Print MCP client config JSON snippet")
 	fmt.Fprintln(os.Stderr, "                  --client=N  1=claude-code 2=claude-desktop 3=cline 4=cursor 5=generic")
+	fmt.Fprintln(os.Stderr, "  health        Check server health (for Docker HEALTHCHECK)")
 	fmt.Fprintln(os.Stderr, "  version       Print version and exit")
 	fmt.Fprintln(os.Stderr, "  help          Show this message")
 	fmt.Fprintln(os.Stderr, "")
