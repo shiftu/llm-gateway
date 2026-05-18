@@ -60,6 +60,10 @@ var registry = map[string]string{
 
 	// Health tools (v0.3 T1)
 	"get_provider_health": "mcp_auditor",
+
+	// Routing-weights tools (v0.3 T2)
+	"set_routing_weights": "mcp_admin",
+	"get_routing_weights": "mcp_auditor",
 }
 
 var (
