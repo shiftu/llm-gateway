@@ -13,6 +13,7 @@ import (
 	"github.com/panda/llm-gateway/internal/health"
 	"github.com/panda/llm-gateway/internal/server"
 	"github.com/panda/llm-gateway/internal/store"
+	"github.com/panda/llm-gateway/internal/telemetry"
 )
 
 const defaultAddr = "127.0.0.1:7421"
@@ -84,6 +85,18 @@ func runStart() int {
 		fmt.Fprintf(os.Stderr, "could not seed model costs: %v\n", err)
 		return 1
 	}
+
+	// T15: OTel tracing — opt-in via LLM_GATEWAY_OTEL_ENDPOINT.
+	if otelEndpoint := os.Getenv("LLM_GATEWAY_OTEL_ENDPOINT"); otelEndpoint != "" {
+		fmt.Fprintf(os.Stderr, "otel: tracing to %s\n", otelEndpoint)
+		otelShutdown, otelErr := telemetry.Init(ctx, otelEndpoint)
+		if otelErr != nil {
+			fmt.Fprintf(os.Stderr, "warn: otel init failed: %v\n", otelErr)
+		} else {
+			defer otelShutdown()
+		}
+	}
+
 	srv := server.NewServer(token, st)
 
 	// v0.3 T1 Q11 startup gate: with LLM_GATEWAY_HEALTH_PROBES=1, probe every

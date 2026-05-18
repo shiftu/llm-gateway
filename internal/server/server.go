@@ -97,7 +97,9 @@ func (s *Server) Handler() http.Handler {
 	if s.quota != nil {
 		h = s.quota.Middleware(h)
 	}
-	return s.auth.Middleware(h)
+	h = s.auth.Middleware(h)
+	h = TracingMiddleware(h)
+	return h
 }
 
 const (
