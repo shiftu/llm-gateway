@@ -157,17 +157,16 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		return
 	}
 
-	bodyToSend := io.Reader(bytes.NewReader(raw))
+	bodyBytes := raw
 	if route.UpstreamModel != clientModel {
 		body["model"] = route.UpstreamModel
-		rewritten, _ := json.Marshal(body)
-		bodyToSend = bytes.NewReader(rewritten)
+		bodyBytes, _ = json.Marshal(body)
 	}
 
 	// F-3 snapshot: copy provider fields needed for this single request so
 	// concurrent MCP add_provider/remove_provider cannot mutate the row out
 	// from under us mid-flight.
-	p := &provider.Provider{
+	currentProvider := &provider.Provider{
 		Name:             route.Provider.Name,
 		Kind:             route.Provider.Kind,
 		OpenAIBaseURL:    route.Provider.OpenAIBaseURL,
@@ -175,17 +174,57 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		APIKey:           route.Provider.APIKey,
 		AnthropicVersion: route.Provider.AnthropicVersion,
 	}
+	tried := map[string]struct{}{route.Provider.Name: {}}
 
 	started := time.Now()
-	resp, dispatchErr := dispatchProtocol(r.Context(), p, protocol, bodyToSend)
+	var resp *http.Response
+	var dispatchErr error
+	for {
+		resp, dispatchErr = dispatchProtocol(r.Context(), currentProvider, protocol, bytes.NewReader(bodyBytes))
+
+		// Determine fallback trigger from response status or transport error.
+		trigger := ""
+		if dispatchErr == nil {
+			switch {
+			case resp.StatusCode == http.StatusTooManyRequests:
+				trigger = "http_429"
+			case resp.StatusCode >= 500:
+				trigger = "http_5xx"
+			}
+		}
+
+		if trigger != "" && s.store != nil {
+			if policy, found, _ := s.store.GetEffectiveFallbackPolicy(trigger, teamID); found {
+				if next := router.NextFallbackProvider(policy, route.Cognitive, tried); next != "" {
+					if resp != nil {
+						resp.Body.Close()
+					}
+					if nextProv, err := s.store.GetProvider(next); err == nil {
+						tried[next] = struct{}{}
+						currentProvider = &provider.Provider{
+							Name:             nextProv.Name,
+							Kind:             nextProv.Kind,
+							OpenAIBaseURL:    nextProv.OpenAIBaseURL,
+							AnthropicBaseURL: nextProv.AnthropicBaseURL,
+							APIKey:           nextProv.APIKey,
+							AnthropicVersion: nextProv.AnthropicVersion,
+						}
+						continue
+					}
+				}
+			}
+		}
+		break
+	}
+
 	if dispatchErr != nil {
 		rl := store.RequestLog{
-			ClientModel:  clientModel,
+			ClientModel:   clientModel,
 			ResolvedModel: route.UpstreamModel,
-			ProviderName: route.Provider.Name,
-			Status:       "upstream_error",
-			LatencyMs:    int(time.Since(started).Milliseconds()),
-			ErrorMsg:     dispatchErr.Error(),
+			ProviderName:  currentProvider.Name,
+			Status:        "upstream_error",
+			LatencyMs:     int(time.Since(started).Milliseconds()),
+			ErrorMsg:      dispatchErr.Error(),
 		}
 		if hasKey {
 			rl.APIKeyID = ak.ID
@@ -194,7 +233,7 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		s.logRequest(rl)
 		if errors.Is(dispatchErr, provider.ErrProtocolUnsupported) {
 			writeStructuredError(w, http.StatusNotImplemented, "cross_protocol_not_supported",
-				fmt.Sprintf("provider %q has no %s base_url; IR translation not yet implemented", p.Name, protocol),
+				fmt.Sprintf("provider %q has no %s base_url; IR translation not yet implemented", currentProvider.Name, protocol),
 				fmt.Sprintf("register the provider with %s_base_url set, or wait for Task 2b IR translation in v0.2", protocol))
 			return
 		}
@@ -208,7 +247,7 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 	rl := store.RequestLog{
 		ClientModel:      clientModel,
 		ResolvedModel:    route.UpstreamModel,
-		ProviderName:     route.Provider.Name,
+		ProviderName:     currentProvider.Name,
 		Status:           "ok",
 		LatencyMs:        int(time.Since(started).Milliseconds()),
 		PromptTokens:     u.InputTokens,

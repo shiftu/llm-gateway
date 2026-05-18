@@ -24,10 +24,9 @@ import (
 )
 
 const (
-	// schemaVersion = 5: v5 adds request_logs.route_trace column (v0.3 T5)
-	// and admin_audit. Existing DBs at user_version=1 get the v1→v2 migration;
-	// fresh DBs run both migrations in one transaction.
-	schemaVersion           = 5
+	// schemaVersion = 6: v6 adds fallback_policies table (v0.3 T4).
+	// v5 added request_logs.route_trace (v0.3 T5).
+	schemaVersion           = 6
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -275,6 +274,20 @@ var migrations = []string{
 	// v4 → v5: request_logs.route_trace column (v0.3 T5 explain trace)
 	`
 	ALTER TABLE request_logs ADD COLUMN route_trace TEXT;
+	`,
+
+	// v5 → v6: fallback_policies table (v0.3 T4)
+	`
+	CREATE TABLE IF NOT EXISTS fallback_policies (
+	  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+	  team_id          TEXT NOT NULL DEFAULT '',
+	  trigger          TEXT NOT NULL CHECK(trigger IN ('quota_exhausted','http_5xx','http_429','latency_exceeded')),
+	  threshold_ms     INTEGER NOT NULL DEFAULT 0,
+	  action           TEXT NOT NULL CHECK(action IN ('next_best','specific_provider')),
+	  target_provider  TEXT NOT NULL DEFAULT '',
+	  max_chain_depth  INTEGER NOT NULL DEFAULT 3,
+	  UNIQUE(team_id, trigger)
+	);
 	`,
 }
 

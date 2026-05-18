@@ -33,6 +33,7 @@ func BuildMCPHandler(st *store.Store, mgr *health.Manager) http.Handler {
 	lgwmcp.RegisterHealthTools(s, mgr)
 	lgwmcp.RegisterRoutingWeightTools(s, st)
 	lgwmcp.RegisterExplainTools(s, st)
+	lgwmcp.RegisterFallbackTools(s, st)
 
 	// Stateless mode: every POST is a fresh session, so callers (curl,
 	// Claude Code, Hermes, etc.) skip the initialize → Mcp-Session-Id

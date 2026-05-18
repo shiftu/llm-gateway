@@ -67,6 +67,11 @@ var registry = map[string]string{
 
 	// Explain trace (v0.3 T5)
 	"explain_route_trace": "mcp_auditor",
+
+	// Fallback policy tools (v0.3 T4)
+	"set_fallback_policy":    "mcp_admin",
+	"remove_fallback_policy": "mcp_admin",
+	"list_fallback_policies": "mcp_auditor",
 }
 
 var (
