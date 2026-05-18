@@ -9,7 +9,7 @@
 .hermes
 
 # Build artifacts
-llm-gateway
+bin/
 *.exe
 
 # Test/coverage

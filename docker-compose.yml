@@ -11,13 +11,17 @@ services:
     environment:
       # Required: set at least one auth token
       LLM_GATEWAY_TOKEN: ${LLM_GATEWAY_TOKEN:?Set LLM_GATEWAY_TOKEN in .env}
-      # Required: master key for provider API key encryption
-      LLM_GATEWAY_MASTER_KEY: ${LLM_GATEWAY_MASTER_KEY:?Set LLM_GATEWAY_MASTER_KEY in .env}
+      # Required in Docker: bind to 0.0.0.0 so port mapping works
+      LLM_GATEWAY_ADDR: 0.0.0.0:7421
+      # Optional: encryption key (if not set, auto-generates /data/llm-gateway/encryption.key)
+      LLM_GATEWAY_MASTER_KEY: ${LLM_GATEWAY_MASTER_KEY:-}
       # Optional: seed a provider on first start
       LLM_GATEWAY_PROVIDER_KIND: ${LLM_GATEWAY_PROVIDER_KIND:-deepseek}
       LLM_GATEWAY_PROVIDER_API_KEY: ${LLM_GATEWAY_PROVIDER_API_KEY:-}
       # Optional: enable Prometheus metrics
       LLM_GATEWAY_ENABLE_METRICS: ${LLM_GATEWAY_ENABLE_METRICS:-0}
+      # Optional: persist RPM counters across restarts
+      LLM_GATEWAY_PERSIST_RPM: ${LLM_GATEWAY_PERSIST_RPM:-0}
 
 volumes:
   gateway-data:

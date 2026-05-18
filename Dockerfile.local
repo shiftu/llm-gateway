@@ -1,0 +1,8 @@
+FROM scratch
+COPY llm-gateway-linux-arm64 /llm-gateway
+COPY ca-certificates.crt /etc/ssl/certs/
+EXPOSE 7421
+ENTRYPOINT ["/llm-gateway"]
+CMD ["start"]
+VOLUME ["/data"]
+ENV XDG_CONFIG_HOME=/data

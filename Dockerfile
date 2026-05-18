@@ -1,5 +1,7 @@
 # Build stage
 FROM golang:1.26-alpine AS builder
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -14,4 +16,8 @@ EXPOSE 7421
 ENTRYPOINT ["/llm-gateway"]
 CMD ["start"]
 VOLUME ["/data"]
-ENV LLM_GATEWAY_DB_PATH=/data/state.db
+# XDG_CONFIG_HOME=/data makes defaultConfigDir() return /data/llm-gateway,
+# so state.db and encryption.key land under the persistent volume.
+ENV XDG_CONFIG_HOME=/data
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD ["/llm-gateway", "health"]
