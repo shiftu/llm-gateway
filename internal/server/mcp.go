@@ -6,6 +6,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	authpkg "github.com/panda/llm-gateway/internal/auth"
+	"github.com/panda/llm-gateway/internal/health"
 	lgwmcp "github.com/panda/llm-gateway/internal/mcp"
 	"github.com/panda/llm-gateway/internal/store"
 )
@@ -23,12 +24,13 @@ import (
 //
 // Quota middleware skips /mcp by path — see quota.go — so admin MCP traffic
 // doesn't burn an lgw_ key's inbound RPM/day budget.
-func BuildMCPHandler(st *store.Store) http.Handler {
+func BuildMCPHandler(st *store.Store, mgr *health.Manager) http.Handler {
 	s := lgwmcp.Build()
 	lgwmcp.RegisterProviderTools(s, st)
 	lgwmcp.RegisterTenancyTools(s, st)
 	lgwmcp.RegisterRoutingTools(s, st)
 	lgwmcp.RegisterWhoamiTool(s, st)
+	lgwmcp.RegisterHealthTools(s, mgr)
 
 	// Stateless mode: every POST is a fresh session, so callers (curl,
 	// Claude Code, Hermes, etc.) skip the initialize → Mcp-Session-Id

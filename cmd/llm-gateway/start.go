@@ -70,16 +70,15 @@ func runStart() int {
 		return 1
 	}
 	srv := server.NewServer(token, st)
-	srv.MountMCP(server.BuildMCPHandler(st))
-
-	printBanner(token, source, cfgDir, addr, st)
 
 	// v0.3 T1 Q11 startup gate: with LLM_GATEWAY_HEALTH_PROBES=1, probe every
 	// configured provider once (10s deadline) before flipping /healthz to 200.
 	// Then start the background loop. With the env unset, MarkReady fires
-	// immediately — health probes are opt-in for v0.3.0.
+	// immediately and the get_provider_health MCP tool reports
+	// "probes disabled". Health probes are opt-in for v0.3.0.
+	var mgr *health.Manager
 	if os.Getenv("LLM_GATEWAY_HEALTH_PROBES") == "1" && st != nil {
-		mgr := health.NewManager(health.Probe, 30*time.Second)
+		mgr = health.NewManager(health.Probe, 30*time.Second)
 		if n, err := server.RegisterHealthTargets(mgr, st); err != nil {
 			fmt.Fprintf(os.Stderr, "warn: could not register health targets: %v\n", err)
 		} else {
@@ -90,6 +89,9 @@ func runStart() int {
 			go mgr.Run(ctx)
 		}
 	}
+	srv.MountMCP(server.BuildMCPHandler(st, mgr))
+
+	printBanner(token, source, cfgDir, addr, st)
 	srv.MarkReady()
 
 	if err := srv.Run(ctx, addr); err != nil {

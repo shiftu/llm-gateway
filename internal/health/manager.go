@@ -12,13 +12,14 @@ import (
 type ProbeFn func(ctx context.Context, url string) ProbeResult
 
 // Snapshot is the observable state of a provider's health at one point in
-// time. Fields grow as TDD adds more behaviors (percentiles, error rate).
+// time. JSON tags are the agent-facing contract (returned by the
+// get_provider_health MCP tool); keep snake_case.
 type Snapshot struct {
-	Name          string
-	URL           string
-	SampleCount   int
-	LastHealthy   bool
-	LastLatencyMs int64
+	Name          string `json:"name"`
+	URL           string `json:"url"`
+	SampleCount   int    `json:"sample_count"`
+	LastHealthy   bool   `json:"last_healthy"`
+	LastLatencyMs int64  `json:"last_latency_ms"`
 }
 
 // Manager tracks a set of provider endpoints and exposes their current health

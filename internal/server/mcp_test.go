@@ -27,7 +27,7 @@ func newMCPGateway(t *testing.T) (*httptest.Server, *store.Store) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	srv := NewServer(mcpLegacyToken, s)
-	srv.MountMCP(BuildMCPHandler(s))
+	srv.MountMCP(BuildMCPHandler(s, nil))
 	gw := httptest.NewServer(srv.Handler())
 	t.Cleanup(gw.Close)
 	return gw, s

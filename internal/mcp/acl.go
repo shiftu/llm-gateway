@@ -57,6 +57,9 @@ var registry = map[string]string{
 
 	// Identity tool
 	"whoami": "mcp_auditor",
+
+	// Health tools (v0.3 T1)
+	"get_provider_health": "mcp_auditor",
 }
 
 var (
