@@ -24,10 +24,10 @@ import (
 )
 
 const (
-	// schemaVersion = 4: v4 adds model_aliases.mode column (v0.3 T3)
+	// schemaVersion = 5: v5 adds request_logs.route_trace column (v0.3 T5)
 	// and admin_audit. Existing DBs at user_version=1 get the v1→v2 migration;
 	// fresh DBs run both migrations in one transaction.
-	schemaVersion           = 4
+	schemaVersion           = 5
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -270,6 +270,11 @@ var migrations = []string{
 	// v3 → v4: model_aliases.mode column (v0.3 T3 cognitive routing)
 	`
 	ALTER TABLE model_aliases ADD COLUMN mode TEXT NOT NULL DEFAULT 'static';
+	`,
+
+	// v4 → v5: request_logs.route_trace column (v0.3 T5 explain trace)
+	`
+	ALTER TABLE request_logs ADD COLUMN route_trace TEXT;
 	`,
 }
 
@@ -596,6 +601,8 @@ type RequestLog struct {
 	// v2 tenancy columns — empty string when not set
 	APIKeyID string
 	TeamID   string
+	// v0.3 T5: JSON-encoded router.CognitiveTrace; empty for static routes
+	RouteTrace string
 }
 
 // ListRequestLogsFilter controls which rows ListRequestLogs returns.
@@ -613,12 +620,12 @@ func (s *Store) LogRequest(r RequestLog) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO request_logs
 		(ts, client_model, resolved_model, provider_name,
 		 prompt_tokens, completion_tokens, total_tokens, latency_ms,
-		 status, error_msg, prompt_excerpt, api_key_id, team_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 status, error_msg, prompt_excerpt, api_key_id, team_id, route_trace)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Ts.UnixMilli(), r.ClientModel, r.ResolvedModel, r.ProviderName,
 		r.PromptTokens, r.CompletionTokens, r.TotalTokens, r.LatencyMs,
 		r.Status, nullable(r.ErrorMsg), nullable(r.PromptExcerpt),
-		nullable(r.APIKeyID), nullable(r.TeamID))
+		nullable(r.APIKeyID), nullable(r.TeamID), nullable(r.RouteTrace))
 	if err != nil {
 		return 0, err
 	}
@@ -648,13 +655,35 @@ func (s *Store) TailLogs(n int) ([]RequestLog, error) {
 func (s *Store) GetRequestLog(id int64) (RequestLog, error) {
 	row := s.db.QueryRow(`SELECT id, ts, client_model, resolved_model, provider_name,
 		prompt_tokens, completion_tokens, total_tokens, latency_ms,
-		status, error_msg, prompt_excerpt
+		status, error_msg, prompt_excerpt,
+		COALESCE(api_key_id, '') AS api_key_id,
+		COALESCE(team_id, '') AS team_id,
+		COALESCE(route_trace, '') AS route_trace
 		FROM request_logs WHERE id = ?`, id)
-	r, err := scanLog(row)
+	var rl RequestLog
+	var ts int64
+	var errMsg, excerpt sql.NullString
+	var promptT, completionT, totalT, latency sql.NullInt64
+	err := row.Scan(
+		&rl.ID, &ts, &rl.ClientModel, &rl.ResolvedModel, &rl.ProviderName,
+		&promptT, &completionT, &totalT, &latency,
+		&rl.Status, &errMsg, &excerpt,
+		&rl.APIKeyID, &rl.TeamID, &rl.RouteTrace,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RequestLog{}, ErrNotFound
 	}
-	return r, err
+	if err != nil {
+		return RequestLog{}, err
+	}
+	rl.Ts = time.UnixMilli(ts)
+	rl.PromptTokens = int(promptT.Int64)
+	rl.CompletionTokens = int(completionT.Int64)
+	rl.TotalTokens = int(totalT.Int64)
+	rl.LatencyMs = int(latency.Int64)
+	rl.ErrorMsg = errMsg.String
+	rl.PromptExcerpt = excerpt.String
+	return rl, nil
 }
 
 // ListRequestLogs returns logs newest-first, optionally filtered by team or
