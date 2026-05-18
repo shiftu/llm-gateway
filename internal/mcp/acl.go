@@ -72,6 +72,10 @@ var registry = map[string]string{
 	"set_fallback_policy":    "mcp_admin",
 	"remove_fallback_policy": "mcp_admin",
 	"list_fallback_policies": "mcp_auditor",
+
+	// Provider capability registry (v0.3 T11)
+	"set_provider_capability":    "mcp_admin",
+	"list_provider_capabilities": "mcp_auditor",
 }
 
 var (

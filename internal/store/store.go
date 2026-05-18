@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	// schemaVersion = 6: v6 adds fallback_policies table (v0.3 T4).
+	// schemaVersion = 7: v7 adds provider_capabilities table (v0.3 T11).
+	// v6 added fallback_policies (v0.3 T4).
 	// v5 added request_logs.route_trace (v0.3 T5).
-	schemaVersion           = 6
+	schemaVersion           = 7
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -287,6 +288,18 @@ var migrations = []string{
 	  target_provider  TEXT NOT NULL DEFAULT '',
 	  max_chain_depth  INTEGER NOT NULL DEFAULT 3,
 	  UNIQUE(team_id, trigger)
+	);
+	`,
+
+	// v6 → v7: provider_capabilities table (v0.3 T11)
+	`
+	CREATE TABLE IF NOT EXISTS provider_capabilities (
+	  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	  provider_name TEXT NOT NULL,
+	  capability    TEXT NOT NULL,
+	  value         TEXT NOT NULL DEFAULT '',
+	  updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+	  UNIQUE(provider_name, capability)
 	);
 	`,
 }

@@ -52,6 +52,7 @@ func runMCPServe() int {
 	lgwmcp.RegisterWhoamiTool(s, st)
 	lgwmcp.RegisterExplainTools(s, st)
 	lgwmcp.RegisterFallbackTools(s, st)
+	lgwmcp.RegisterCapabilityTools(s, st)
 
 	stdio := mcpserver.NewStdioServer(s)
 	stdio.SetContextFunc(lgwmcp.MakeContextFunc(token, st, cache))
