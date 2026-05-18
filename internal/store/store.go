@@ -24,10 +24,10 @@ import (
 )
 
 const (
-	// schemaVersion = 3: v3 adds routing_weights (v0.3 T2)
+	// schemaVersion = 4: v4 adds model_aliases.mode column (v0.3 T3)
 	// and admin_audit. Existing DBs at user_version=1 get the v1→v2 migration;
 	// fresh DBs run both migrations in one transaction.
-	schemaVersion           = 3
+	schemaVersion           = 4
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -266,6 +266,11 @@ var migrations = []string{
 	  updated_at INTEGER NOT NULL
 	);
 	`,
+
+	// v3 → v4: model_aliases.mode column (v0.3 T3 cognitive routing)
+	`
+	ALTER TABLE model_aliases ADD COLUMN mode TEXT NOT NULL DEFAULT 'static';
+	`,
 }
 
 // applyMigrations brings the DB schema up to schemaVersion in a single
@@ -450,34 +455,51 @@ func (s *Store) SetDefaultProvider(name string) error {
 	return tx.Commit()
 }
 
-// Alias mirrors a row in model_aliases.
+// Alias mirrors a row in model_aliases. Mode is "static" (v0.2 fixed
+// provider mapping) or "cognitive" (v0.3 T3 — router scores eligible
+// providers and picks the highest).
 type Alias struct {
 	Alias               string
 	ProviderName        string
 	UpstreamModel       string
 	ContextLength       *int64
 	MaxCompletionTokens *int64
+	Mode                string
 	CreatedAt           time.Time
 }
 
-// SetAlias is upsert for GLOBAL aliases (team_id IS NULL). Re-setting an
-// existing alias overwrites provider, upstream model, and metadata.
-// contextLength and maxCompletionTokens are optional (nil clears them).
+// SetAlias is upsert for GLOBAL aliases (team_id IS NULL) with the default
+// mode "static". Re-setting an existing alias overwrites provider, upstream
+// model, and metadata. contextLength and maxCompletionTokens are optional
+// (nil clears them). Mode stays whatever the row already had (or schema
+// default for new rows) — callers that want to flip mode must use
+// SetAliasWithMode.
 func (s *Store) SetAlias(alias, providerName, upstreamModel string, contextLength, maxCompletionTokens *int64) error {
+	return s.SetAliasWithMode(alias, providerName, upstreamModel, contextLength, maxCompletionTokens, "static")
+}
+
+// SetAliasWithMode is the full upsert variant that also sets the routing
+// mode ("static" or "cognitive", v0.3 T3). New rows get the requested mode;
+// existing rows have their mode updated to match.
+func (s *Store) SetAliasWithMode(alias, providerName, upstreamModel string, contextLength, maxCompletionTokens *int64, mode string) error {
+	if mode == "" {
+		mode = "static"
+	}
 	now := time.Now().UnixMilli()
-	_, err := s.db.Exec(`INSERT INTO model_aliases (alias, team_id, provider_name, upstream_model, context_length, max_completion_tokens, created_at)
-		VALUES (?, NULL, ?, ?, ?, ?, ?)
+	_, err := s.db.Exec(`INSERT INTO model_aliases (alias, team_id, provider_name, upstream_model, context_length, max_completion_tokens, mode, created_at)
+		VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(alias) WHERE team_id IS NULL DO UPDATE SET
 			provider_name = excluded.provider_name,
 			upstream_model = excluded.upstream_model,
 			context_length = excluded.context_length,
-			max_completion_tokens = excluded.max_completion_tokens`,
-		alias, providerName, upstreamModel, contextLength, maxCompletionTokens, now)
+			max_completion_tokens = excluded.max_completion_tokens,
+			mode = excluded.mode`,
+		alias, providerName, upstreamModel, contextLength, maxCompletionTokens, mode, now)
 	return err
 }
 
 func (s *Store) ResolveAlias(alias string) (Alias, error) {
-	row := s.db.QueryRow(`SELECT alias, provider_name, upstream_model, created_at, context_length, max_completion_tokens
+	row := s.db.QueryRow(`SELECT alias, provider_name, upstream_model, created_at, context_length, max_completion_tokens, mode
 		FROM model_aliases WHERE alias = ? AND team_id IS NULL`, alias)
 	return scanAlias(row)
 }
@@ -486,7 +508,7 @@ func (s *Store) ResolveAlias(alias string) (Alias, error) {
 // then falling back to global aliases (team_id IS NULL).
 func (s *Store) ResolveAliasForTeam(alias, teamID string) (Alias, error) {
 	if teamID != "" {
-		row := s.db.QueryRow(`SELECT alias, provider_name, upstream_model, created_at, context_length, max_completion_tokens
+		row := s.db.QueryRow(`SELECT alias, provider_name, upstream_model, created_at, context_length, max_completion_tokens, mode
 			FROM model_aliases WHERE alias = ? AND team_id = ?`, alias, teamID)
 		if a, err := scanAlias(row); err == nil {
 			return a, nil
@@ -498,7 +520,7 @@ func (s *Store) ResolveAliasForTeam(alias, teamID string) (Alias, error) {
 }
 
 func (s *Store) ListAliases() ([]Alias, error) {
-	rows, err := s.db.Query(`SELECT alias, provider_name, upstream_model, created_at, context_length, max_completion_tokens
+	rows, err := s.db.Query(`SELECT alias, provider_name, upstream_model, created_at, context_length, max_completion_tokens, mode
 		FROM model_aliases WHERE team_id IS NULL ORDER BY alias ASC`)
 	if err != nil {
 		return nil, err
@@ -508,7 +530,7 @@ func (s *Store) ListAliases() ([]Alias, error) {
 
 // ListAliasesForTeam returns aliases scoped to a specific team, ordered by alias.
 func (s *Store) ListAliasesForTeam(teamID string) ([]Alias, error) {
-	rows, err := s.db.Query(`SELECT alias, provider_name, upstream_model, created_at, context_length, max_completion_tokens
+	rows, err := s.db.Query(`SELECT alias, provider_name, upstream_model, created_at, context_length, max_completion_tokens, mode
 		FROM model_aliases WHERE team_id = ? ORDER BY alias ASC`, teamID)
 	if err != nil {
 		return nil, err
@@ -781,7 +803,7 @@ func boolInt(b bool) int {
 func scanAlias(r rowScanner) (Alias, error) {
 	var a Alias
 	var createdAt int64
-	if err := r.Scan(&a.Alias, &a.ProviderName, &a.UpstreamModel, &createdAt, &a.ContextLength, &a.MaxCompletionTokens); err != nil {
+	if err := r.Scan(&a.Alias, &a.ProviderName, &a.UpstreamModel, &createdAt, &a.ContextLength, &a.MaxCompletionTokens, &a.Mode); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Alias{}, ErrNotFound
 		}
