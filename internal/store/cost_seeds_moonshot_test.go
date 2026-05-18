@@ -24,6 +24,6 @@ func TestSeedMoonshotModelCosts(t *testing.T) {
 	}
 	// Verify re-run is idempotent
 	if err := SeedMoonshotModelCosts(s); err != nil {
-		t.Fatal("re-run should be idempotent")
+		t.Fatalf("re-run should be idempotent: %v", err)
 	}
 }

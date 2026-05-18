@@ -77,9 +77,9 @@ func TestLive_Qwen_OpenAIPassthrough_Streaming(t *testing.T) {
 		t.Errorf("stream Content-Type: want text/event-stream*, got %q", ct)
 	}
 	bs, _ := io.ReadAll(resp.Body)
-	body_s := string(bs)
-	if !strings.Contains(body_s, "data: ") || !strings.Contains(body_s, "[DONE]") {
-		t.Errorf("stream body missing data: lines or [DONE] sentinel; body=%s", body_s)
+	bodyStr := string(bs)
+	if !strings.Contains(bodyStr, "data: ") || !strings.Contains(bodyStr, "[DONE]") {
+		t.Errorf("stream body missing data: lines or [DONE] sentinel; body=%s", bodyStr)
 	}
 	t.Logf("openai-stream bytes=%d", len(bs))
 }

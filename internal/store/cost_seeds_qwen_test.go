@@ -24,6 +24,6 @@ func TestSeedQwenModelCosts(t *testing.T) {
 	}
 	// Verify re-run is idempotent
 	if err := SeedQwenModelCosts(s); err != nil {
-		t.Fatal("re-run should be idempotent")
+		t.Fatalf("re-run should be idempotent: %v", err)
 	}
 }
