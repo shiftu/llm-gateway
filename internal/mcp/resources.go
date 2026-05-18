@@ -18,6 +18,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -148,9 +149,11 @@ func teamUsageHandler(st *store.Store) mcpserver.ResourceTemplateHandlerFunc {
 		}
 		for _, k := range keys {
 			uc, err := st.GetUsageCounter(k.ID, todayMS)
-			if err != nil {
-				// ErrNotFound means no usage recorded for this key today — skip.
+			if errors.Is(err, store.ErrNotFound) {
 				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("usage query error: %w", err)
 			}
 			result.InputTokens += uc.InputTokens
 			result.OutputTokens += uc.OutputTokens
@@ -205,10 +208,6 @@ func teamQuotaHandler(st *store.Store) mcpserver.ResourceTemplateHandlerFunc {
 		for i, q := range quotas {
 			out[i] = quotaToJSON(q)
 		}
-		// Return [] not null when empty.
-		if out == nil {
-			out = []quotaJSON{}
-		}
 		return jsonResource(req.Params.URI, out)
 	}
 }
@@ -243,10 +242,6 @@ func providersHandler(st *store.Store) mcpserver.ResourceTemplateHandlerFunc {
 				HasAnthropicURL: p.AnthropicBaseURL != "",
 				IsDefault:       p.IsDefault,
 			}
-		}
-		// Return [] not null when empty.
-		if out == nil {
-			out = []providerInfoJSON{}
 		}
 		return jsonResource(req.Params.URI, out)
 	}
@@ -315,10 +310,6 @@ func providerCapabilitiesHandler(st *store.Store) mcpserver.ResourceTemplateHand
 				Value:      c.Value,
 				UpdatedAt:  c.UpdatedAt,
 			}
-		}
-		// ListProviderCapabilities already returns [] not nil, but be safe.
-		if out == nil {
-			out = []resourceCapabilityJSON{}
 		}
 		return jsonResource(req.Params.URI, out)
 	}
