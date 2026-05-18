@@ -18,13 +18,17 @@ func ToolsFromOpenAI(raw []json.RawMessage) []Tool {
 			} `json:"function"`
 		}
 		if err := json.Unmarshal(r, &wrapper); err != nil {
-			return nil
+			continue
 		}
-		out = append(out, Tool{
+		t := Tool{
 			Name:        wrapper.Function.Name,
 			Description: wrapper.Function.Description,
 			InputSchema: wrapper.Function.Parameters,
-		})
+		}
+		if t.Name == "" {
+			continue
+		}
+		out = append(out, t)
 	}
 	return out
 }
@@ -65,8 +69,7 @@ func ToolUsesFromOpenAI(body []byte) []ToolUse {
 				ToolCalls []struct {
 					ID       string `json:"id"`
 					Function struct {
-						Name string `json:"name"`
-						// OpenAI encodes arguments as a JSON string, not a map
+						Name      string `json:"name"`
 						Arguments string `json:"arguments"`
 					} `json:"function"`
 				} `json:"tool_calls"`
@@ -85,8 +88,9 @@ func ToolUsesFromOpenAI(body []byte) []ToolUse {
 		var input map[string]any
 		// Arguments is a JSON-encoded string per the OpenAI wire format — parse it into a map
 		if tc.Function.Arguments != "" {
+			// Arguments is a JSON-encoded string per the OpenAI wire format — parse it into a map
 			if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
-				return nil
+				continue
 			}
 		}
 		out = append(out, ToolUse{
@@ -111,9 +115,10 @@ func ToolUsesToOpenAI(uses []ToolUse) []map[string]any {
 		var argsStr string
 		if u.Input != nil {
 			b, err := json.Marshal(u.Input)
-			if err == nil {
-				argsStr = string(b)
+			if err != nil {
+				b = []byte("{}")
 			}
+			argsStr = string(b)
 		} else {
 			argsStr = "{}"
 		}

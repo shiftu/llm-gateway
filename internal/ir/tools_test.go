@@ -59,17 +59,13 @@ func TestToolsFromOpenAI_InvalidJSON(t *testing.T) {
 }
 
 func TestToolsFromOpenAI_MissingFunctionKey(t *testing.T) {
-	// type=function but no "function" object — skip gracefully
+	// type=function but no "function" object — skip entries with empty name
 	raw := []json.RawMessage{
 		json.RawMessage(`{"type":"function"}`),
 	}
 	tools := ToolsFromOpenAI(raw)
-	// Name will be empty string — still produces an entry, just with empty name
-	if len(tools) != 1 {
-		t.Fatalf("want 1 tool (empty name), got %d", len(tools))
-	}
-	if tools[0].Name != "" {
-		t.Errorf("Name: want empty, got %q", tools[0].Name)
+	if tools != nil {
+		t.Fatalf("want nil (empty-name entry skipped), got %v", tools)
 	}
 }
 
@@ -452,5 +448,31 @@ func TestCrossProtocol_AnthropicToOpenAI_ToolUses(t *testing.T) {
 	}
 	if parsed["location"] != "Paris" {
 		t.Errorf("arguments[location]: want Paris, got %v", parsed["location"])
+	}
+}
+
+// --- is_error round-trip for Anthropic ---
+
+func TestToolResultsAnthropic_IsErrorRoundTrip(t *testing.T) {
+	// ToAnthropic: IsError:true should emit is_error:true in the output map
+	input := []ToolResult{{ToolUseID: "t1", Content: "err", IsError: true}}
+	out := ToolResultsToAnthropic(input)
+	if len(out) != 1 {
+		t.Fatalf("want 1, got %d", len(out))
+	}
+	if out[0]["is_error"] != true {
+		t.Errorf("is_error: want true, got %v", out[0]["is_error"])
+	}
+
+	// FromAnthropic: is_error:true in content block should set ToolResult.IsError
+	content := []map[string]any{
+		{"type": "tool_result", "tool_use_id": "t1", "content": "err", "is_error": true},
+	}
+	results := ToolResultsFromAnthropic(content)
+	if len(results) != 1 {
+		t.Fatalf("want 1, got %d", len(results))
+	}
+	if !results[0].IsError {
+		t.Errorf("IsError: want true, got false")
 	}
 }
