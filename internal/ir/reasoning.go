@@ -14,13 +14,11 @@ type Reasoning struct {
 
 // Empty reports whether there is no reasoning content.
 func (r Reasoning) Empty() bool {
-	return r.Content == "" && len(r.Blocks) == 0 && r.Tokens == 0
+	return r.Content == "" && len(r.Blocks) == 0
 }
 
 // ── OpenAI / DeepSeek blocking ────────────────────────────────────────────────
 
-// openAIBlockingResponse is the minimal shape we care about for reasoning
-// extraction from an OpenAI-format blocking response.
 type openAIBlockingResponse struct {
 	Choices []struct {
 		Message struct {
@@ -28,8 +26,8 @@ type openAIBlockingResponse struct {
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
-		ReasoningTokens          int `json:"reasoning_tokens"`
-		CompletionTokensDetails  struct {
+		ReasoningTokens         int `json:"reasoning_tokens"`
+		CompletionTokensDetails struct {
 			ReasoningTokens int `json:"reasoning_tokens"`
 		} `json:"completion_tokens_details"`
 	} `json:"usage"`
@@ -63,8 +61,6 @@ func ExtractReasoningOpenAI(body []byte) Reasoning {
 
 // ── Anthropic blocking ────────────────────────────────────────────────────────
 
-// anthropicBlockingResponse is the minimal shape for reasoning extraction from
-// an Anthropic-format blocking response.
 type anthropicBlockingResponse struct {
 	Content []ContentBlock `json:"content"`
 	Usage   struct {
@@ -101,8 +97,6 @@ func ExtractReasoningAnthropic(body []byte) Reasoning {
 
 // ── OpenAI / DeepSeek streaming ───────────────────────────────────────────────
 
-// openAIStreamChunk is the minimal shape for extracting reasoning from a single
-// OpenAI SSE data chunk.
 type openAIStreamChunk struct {
 	Choices []struct {
 		Delta struct {
@@ -119,7 +113,8 @@ type openAIStreamChunk struct {
 
 // ExtractReasoningDeltaOpenAI extracts the reasoning_content delta from a
 // single OpenAI SSE data chunk. Returns ("", 0, false) when not a reasoning
-// chunk. tokens is non-zero only on the final usage chunk.
+// chunk. ok is true when the chunk contains a non-empty reasoning delta OR
+// when the usage chunk carries non-zero reasoning_tokens.
 func ExtractReasoningDeltaOpenAI(chunk []byte) (content string, tokens int, ok bool) {
 	var c openAIStreamChunk
 	if err := json.Unmarshal(chunk, &c); err != nil {
@@ -150,8 +145,6 @@ func ExtractReasoningDeltaOpenAI(chunk []byte) (content string, tokens int, ok b
 
 // ── Anthropic streaming ───────────────────────────────────────────────────────
 
-// anthropicStreamChunk is the minimal shape for extracting thinking deltas
-// from a single Anthropic SSE data chunk.
 type anthropicStreamChunk struct {
 	Type         string `json:"type"`
 	ContentBlock *struct {
@@ -210,10 +203,9 @@ func EmitReasoningOpenAI(r Reasoning, dest map[string]any) {
 }
 
 // EmitReasoningAnthropicBlocks returns the thinking content blocks for use in
-// an Anthropic-format response's content array. Returns nil when r.Empty() or
-// when r.Blocks is nil.
+// an Anthropic-format response's content array. Returns nil when r.Empty().
 func EmitReasoningAnthropicBlocks(r Reasoning) []ContentBlock {
-	if r.Empty() || len(r.Blocks) == 0 {
+	if r.Empty() {
 		return nil
 	}
 	return r.Blocks

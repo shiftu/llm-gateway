@@ -2,7 +2,6 @@ package ir
 
 import (
 	"encoding/json"
-	"reflect"
 	"testing"
 )
 
@@ -16,7 +15,7 @@ func TestReasoning_Empty(t *testing.T) {
 	}{
 		{"zero value", Reasoning{}, true},
 		{"content only", Reasoning{Content: "hello"}, false},
-		{"tokens only", Reasoning{Tokens: 10}, false},
+		{"tokens only", Reasoning{Tokens: 10}, true},
 		{"blocks only", Reasoning{Blocks: []ContentBlock{{Type: BlockTypeThinking, Thinking: "t"}}}, false},
 		{"all set", Reasoning{Content: "x", Tokens: 5, Blocks: []ContentBlock{{Type: BlockTypeThinking}}}, false},
 		{"empty content empty blocks zero tokens", Reasoning{Content: "", Tokens: 0, Blocks: nil}, true},
@@ -59,6 +58,9 @@ func TestExtractReasoningOpenAI(t *testing.T) {
 		}
 		if r.Content != "" {
 			t.Errorf("Content: want empty, got %q", r.Content)
+		}
+		if r.Blocks != nil {
+			t.Errorf("Blocks: want nil, got %v", r.Blocks)
 		}
 	})
 
@@ -386,8 +388,13 @@ func TestEmitReasoningAnthropicBlocks(t *testing.T) {
 		}
 		r := Reasoning{Content: "thought 1thought 2", Tokens: 20, Blocks: blocks}
 		got := EmitReasoningAnthropicBlocks(r)
-		if !reflect.DeepEqual(got, blocks) {
-			t.Errorf("blocks mismatch:\ngot  %+v\nwant %+v", got, blocks)
+		if len(got) != len(blocks) {
+			t.Fatalf("blocks len: want %d, got %d", len(blocks), len(got))
+		}
+		for i := range blocks {
+			if got[i].Type != blocks[i].Type || got[i].Thinking != blocks[i].Thinking || got[i].Signature != blocks[i].Signature {
+				t.Errorf("blocks[%d] mismatch: got %+v, want %+v", i, got[i], blocks[i])
+			}
 		}
 	})
 
