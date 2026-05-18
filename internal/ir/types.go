@@ -105,12 +105,13 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 // Response.Content. Per spike F1: thinking blocks carry the model's hidden
 // chain-of-thought plus an opaque `signature` Anthropic uses for integrity.
 type ContentBlock struct {
-	Type      string      `json:"type"`
-	Text      string      `json:"text,omitempty"`
-	Thinking  string      `json:"thinking,omitempty"`
-	Signature string      `json:"signature,omitempty"`
-	ToolUse   *ToolUse    `json:"-"` // exposed via type=tool_use; flattened on (un)marshal in adapter
-	ToolResult *ToolResult `json:"-"` // exposed via type=tool_result; flattened in adapter
+	Type         string        `json:"type"`
+	Text         string        `json:"text,omitempty"`
+	Thinking     string        `json:"thinking,omitempty"`
+	Signature    string        `json:"signature,omitempty"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+	ToolUse      *ToolUse      `json:"-"` // exposed via type=tool_use; flattened on (un)marshal in adapter
+	ToolResult   *ToolResult   `json:"-"` // exposed via type=tool_result; flattened in adapter
 }
 
 // Tool, ToolUse, ToolResult mirror Anthropic Messages shapes. Tool-use
