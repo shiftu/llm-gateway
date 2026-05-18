@@ -56,6 +56,7 @@ func RegisterProviderTools(s *mcpserver.MCPServer, st *store.Store) {
 			mcplib.WithString("upstream_model", mcplib.Required(), mcplib.Description("Actual model name at the provider, e.g. 'deepseek-v4-flash'")),
 			mcplib.WithNumber("context_length", mcplib.Description("Context window in tokens (optional). Returned in /v1/models for agent model-selection.")),
 			mcplib.WithNumber("max_completion_tokens", mcplib.Description("Max output tokens (optional). Returned in /v1/models for agent model-selection.")),
+			mcplib.WithString("mode", mcplib.Description("Routing mode: 'static' (default — fixed provider) or 'cognitive' (v0.3 T3 — router scores eligible providers and picks the highest)")),
 		),
 		setModelAliasHandler(st),
 	)
@@ -218,13 +219,17 @@ func setModelAliasHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 		}
 		contextLength := optInt64(req.GetInt("context_length", 0))
 		maxCompletionTokens := optInt64(req.GetInt("max_completion_tokens", 0))
-		if err := st.SetAlias(alias, providerName, upstreamModel, contextLength, maxCompletionTokens); err != nil {
+		mode := req.GetString("mode", "static")
+		if mode != "static" && mode != "cognitive" {
+			return mcplib.NewToolResultError("invalid mode: " + mode + " (want 'static' or 'cognitive')"), nil
+		}
+		if err := st.SetAliasWithMode(alias, providerName, upstreamModel, contextLength, maxCompletionTokens, mode); err != nil {
 			return mcplib.NewToolResultError("set_model_alias failed: " + err.Error()), nil
 		}
-		audit(st, "set_model_alias", "alias", alias, map[string]string{"provider": providerName, "upstream_model": upstreamModel})
+		audit(st, "set_model_alias", "alias", alias, map[string]string{"provider": providerName, "upstream_model": upstreamModel, "mode": mode})
 		out, _ := json.Marshal(map[string]any{
 			"ok": true, "alias": alias,
-			"provider": providerName, "upstream_model": upstreamModel,
+			"provider": providerName, "upstream_model": upstreamModel, "mode": mode,
 		})
 		return mcplib.NewToolResultText(string(out)), nil
 	}
