@@ -23,9 +23,10 @@ func TestRegisterHealthTargets(t *testing.T) {
 	mustAdd(t, st, store.Provider{Name: "glm", Kind: "glm", OpenAIBaseURL: "https://open.bigmodel.cn/api/paas", APIKey: "k2"})
 	mustAdd(t, st, store.Provider{Name: "anthr-only", Kind: "anthropic", AnthropicBaseURL: "https://api.anthropic.com", APIKey: "k3"})
 
-	var probed []string
-	fakeProbe := func(_ context.Context, url string) health.ProbeResult {
-		probed = append(probed, url)
+	type call struct{ url, token string }
+	var probed []call
+	fakeProbe := func(_ context.Context, url, token string) health.ProbeResult {
+		probed = append(probed, call{url, token})
 		return health.ProbeResult{Healthy: true, LatencyMs: 1}
 	}
 	mgr := health.NewManager(fakeProbe, time.Minute)
@@ -38,20 +39,25 @@ func TestRegisterHealthTargets(t *testing.T) {
 		t.Errorf("registered count: want 2 (deepseek + glm; anthr-only skipped), got %d", n)
 	}
 
-	// Drive one bootstrap sweep so we can read back the URLs that got probed.
+	// Drive one bootstrap sweep so we can read back the URLs and tokens probed.
 	if err := mgr.Bootstrap(context.Background()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 	if len(probed) != 2 {
-		t.Fatalf("probed URLs: want 2, got %d (%v)", len(probed), probed)
+		t.Fatalf("probed calls: want 2, got %d (%v)", len(probed), probed)
 	}
-	wantURLs := map[string]bool{
-		"https://api.deepseek.com/v1/models":           true,
-		"https://open.bigmodel.cn/api/paas/v1/models": true,
+	wantCalls := map[string]string{
+		"https://api.deepseek.com/v1/models":           "k1",
+		"https://open.bigmodel.cn/api/paas/v1/models": "k2",
 	}
-	for _, u := range probed {
-		if !wantURLs[u] {
-			t.Errorf("unexpected probe URL %q (want one of %v)", u, wantURLs)
+	for _, c := range probed {
+		wantToken, ok := wantCalls[c.url]
+		if !ok {
+			t.Errorf("unexpected probe URL %q", c.url)
+			continue
+		}
+		if c.token != wantToken {
+			t.Errorf("probe %q: token want %q, got %q", c.url, wantToken, c.token)
 		}
 	}
 }
@@ -59,7 +65,7 @@ func TestRegisterHealthTargets(t *testing.T) {
 // TestRegisterHealthTargets_NilStore: stub-mode boot (no store) registers
 // nothing and returns no error — health probe is just disabled.
 func TestRegisterHealthTargets_NilStore(t *testing.T) {
-	mgr := health.NewManager(func(_ context.Context, _ string) health.ProbeResult {
+	mgr := health.NewManager(func(_ context.Context, _, _ string) health.ProbeResult {
 		return health.ProbeResult{}
 	}, time.Minute)
 	n, err := RegisterHealthTargets(mgr, nil)

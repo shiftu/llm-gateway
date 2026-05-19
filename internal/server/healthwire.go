@@ -26,7 +26,7 @@ func RegisterHealthTargets(mgr *health.Manager, st *store.Store) (int, error) {
 		if p.OpenAIBaseURL == "" {
 			continue
 		}
-		mgr.Register(p.Name, p.OpenAIBaseURL+"/v1/models")
+		mgr.Register(p.Name, p.OpenAIBaseURL+"/v1/models", p.APIKey)
 		n++
 	}
 	return n, nil

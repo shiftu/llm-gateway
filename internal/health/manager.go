@@ -9,7 +9,7 @@ import (
 // ProbeFn is the callable signature of Probe. The Manager takes it as an
 // injectable dependency so tests can supply a fake instead of standing up an
 // httptest server for every assertion.
-type ProbeFn func(ctx context.Context, url string) ProbeResult
+type ProbeFn func(ctx context.Context, url, token string) ProbeResult
 
 // Snapshot is the observable state of a provider's health at one point in
 // time. JSON tags are the agent-facing contract (returned by the
@@ -22,6 +22,12 @@ type Snapshot struct {
 	LastLatencyMs int64  `json:"last_latency_ms"`
 }
 
+// targetConf holds the probe URL and auth token for one provider.
+type targetConf struct {
+	url   string
+	token string
+}
+
 // Manager tracks a set of provider endpoints and exposes their current health
 // state. Concurrency: Register may be called from MCP handlers while Run is
 // looping, and Snapshot may be called from any goroutine — the mu RWMutex
@@ -32,7 +38,7 @@ type Manager struct {
 	interval time.Duration
 
 	mu      sync.RWMutex
-	targets map[string]string // name → url
+	targets map[string]targetConf // name → {url, token}
 	windows map[string]*Window
 }
 
@@ -43,37 +49,38 @@ func NewManager(probe ProbeFn, interval time.Duration) *Manager {
 	return &Manager{
 		probe:    probe,
 		interval: interval,
-		targets:  make(map[string]string),
+		targets:  make(map[string]targetConf),
 		windows:  make(map[string]*Window),
 	}
 }
 
-// Register adds (or replaces) a provider target. The window is created lazily
-// here so that Bootstrap can record into it without a second lookup.
-func (m *Manager) Register(name, url string) {
+// Register adds (or replaces) a provider target. token is sent as
+// "Authorization: Bearer <token>" on every probe request.
+func (m *Manager) Register(name, url, token string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.targets[name] = url
+	m.targets[name] = targetConf{url: url, token: token}
 	if _, ok := m.windows[name]; !ok {
 		m.windows[name] = NewWindow(128)
 	}
 }
 
-// snapshotTargets returns a slice of (name, url, window) tuples taken under
-// RLock so the probe loop can release the manager lock before issuing slow
-// HTTP calls. Window itself is internally thread-safe.
+// snapshotTargets returns a slice of (name, url, token, window) tuples taken
+// under RLock so the probe loop can release the manager lock before issuing
+// slow HTTP calls. Window itself is internally thread-safe.
 type targetEntry struct {
-	name string
-	url  string
-	w    *Window
+	name  string
+	url   string
+	token string
+	w     *Window
 }
 
 func (m *Manager) snapshotTargets() []targetEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]targetEntry, 0, len(m.targets))
-	for name, url := range m.targets {
-		out = append(out, targetEntry{name: name, url: url, w: m.windows[name]})
+	for name, conf := range m.targets {
+		out = append(out, targetEntry{name: name, url: conf.url, token: conf.token, w: m.windows[name]})
 	}
 	return out
 }
@@ -83,7 +90,7 @@ func (m *Manager) snapshotTargets() []targetEntry {
 // caller blocks on Bootstrap before flipping /healthz to 200.
 func (m *Manager) Bootstrap(ctx context.Context) error {
 	for _, t := range m.snapshotTargets() {
-		res := m.probe(ctx, t.url)
+		res := m.probe(ctx, t.url, t.token)
 		t.w.Record(res.LatencyMs, res.Healthy, time.Now())
 	}
 	return nil
@@ -100,7 +107,7 @@ func (m *Manager) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			for _, e := range m.snapshotTargets() {
-				res := m.probe(ctx, e.url)
+				res := m.probe(ctx, e.url, e.token)
 				e.w.Record(res.LatencyMs, res.Healthy, time.Now())
 			}
 		}
@@ -111,13 +118,13 @@ func (m *Manager) Run(ctx context.Context) {
 // name is unknown.
 func (m *Manager) Snapshot(name string) (Snapshot, bool) {
 	m.mu.RLock()
-	url, ok := m.targets[name]
+	conf, ok := m.targets[name]
 	w := m.windows[name]
 	m.mu.RUnlock()
 	if !ok {
 		return Snapshot{}, false
 	}
-	snap := Snapshot{Name: name, URL: url, SampleCount: w.Len()}
+	snap := Snapshot{Name: name, URL: conf.url, SampleCount: w.Len()}
 	if last, ok := w.LastSample(); ok {
 		snap.LastHealthy = last.Success
 		snap.LastLatencyMs = last.LatencyMs

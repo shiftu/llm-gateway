@@ -19,7 +19,7 @@ func TestProbe_Healthy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	r := Probe(ctx, srv.URL)
+	r := Probe(ctx, srv.URL, "")
 	if !r.Healthy {
 		t.Errorf("Healthy: want true, got false (err=%v, status=%d)", r.Err, r.StatusCode)
 	}
@@ -34,6 +34,29 @@ func TestProbe_Healthy(t *testing.T) {
 	}
 }
 
+// TestProbe_BearerToken: when a non-empty token is supplied, the probe sets
+// "Authorization: Bearer <token>" on the request — required for authenticated
+// provider endpoints like /v1/models.
+func TestProbe_BearerToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	r := Probe(ctx, srv.URL, "secret-key")
+	if !r.Healthy {
+		t.Errorf("Healthy: want true, got false (err=%v)", r.Err)
+	}
+	if gotAuth != "Bearer secret-key" {
+		t.Errorf("Authorization header: want %q, got %q", "Bearer secret-key", gotAuth)
+	}
+}
+
 // TestProbe_Unhealthy5xx: server returns 503 → Healthy=false, StatusCode=503,
 // Err=nil (the transport succeeded; the upstream just rejected us).
 func TestProbe_Unhealthy5xx(t *testing.T) {
@@ -45,7 +68,7 @@ func TestProbe_Unhealthy5xx(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	r := Probe(ctx, srv.URL)
+	r := Probe(ctx, srv.URL, "")
 	if r.Healthy {
 		t.Errorf("Healthy: want false (503 is not 2xx), got true")
 	}
@@ -72,7 +95,7 @@ func TestProbe_Timeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	r := Probe(ctx, srv.URL)
+	r := Probe(ctx, srv.URL, "")
 	if r.Healthy {
 		t.Errorf("Healthy: want false (timeout), got true")
 	}
@@ -92,7 +115,7 @@ func TestProbe_BadURL(t *testing.T) {
 	defer cancel()
 
 	// Reserved TEST-NET-1 (RFC 5737), no listener, dropped or unreachable.
-	r := Probe(ctx, "http://192.0.2.1:1/")
+	r := Probe(ctx, "http://192.0.2.1:1/", "")
 	if r.Healthy {
 		t.Errorf("Healthy: want false (unreachable), got true")
 	}

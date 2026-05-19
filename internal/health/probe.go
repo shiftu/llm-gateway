@@ -18,10 +18,13 @@ type ProbeResult struct {
 // whether the upstream looks alive. It is the lowest-level primitive in the
 // health package; callers (Manager) supply the per-provider target URL.
 //
+// token, when non-empty, is sent as "Authorization: Bearer <token>" so the
+// probe request is authenticated — required by every provider's /v1/models.
+//
 // Healthy = (response status is 2xx) AND (no transport error).
 // LatencyMs is recorded even on failure so callers can distinguish "slow and
 // failing" from "fast and failing."
-func Probe(ctx context.Context, url string) ProbeResult {
+func Probe(ctx context.Context, url, token string) ProbeResult {
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -30,6 +33,9 @@ func Probe(ctx context.Context, url string) ProbeResult {
 			LatencyMs: time.Since(start).Milliseconds(),
 			Err:       err,
 		}
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	latency := time.Since(start).Milliseconds()

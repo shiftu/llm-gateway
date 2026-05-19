@@ -15,14 +15,14 @@ import (
 func TestManager_BootstrapProbesRegistered(t *testing.T) {
 	probeCalls := 0
 	var lastURL string
-	fakeProbe := func(_ context.Context, url string) ProbeResult {
+	fakeProbe := func(_ context.Context, url, _ string) ProbeResult {
 		probeCalls++
 		lastURL = url
 		return ProbeResult{Healthy: true, LatencyMs: 42, StatusCode: 200}
 	}
 
 	m := NewManager(fakeProbe, 100*time.Millisecond)
-	m.Register("deepseek", "https://api.deepseek.com/v1/models")
+	m.Register("deepseek", "https://api.deepseek.com/v1/models", "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
@@ -58,12 +58,12 @@ func TestManager_BootstrapProbesRegistered(t *testing.T) {
 // cleanly (no leaked goroutine).
 func TestManager_RunRecordsOnTick(t *testing.T) {
 	var probeCount atomic.Int64
-	fakeProbe := func(_ context.Context, _ string) ProbeResult {
+	fakeProbe := func(_ context.Context, _, _ string) ProbeResult {
 		probeCount.Add(1)
 		return ProbeResult{Healthy: true, LatencyMs: 5}
 	}
 	m := NewManager(fakeProbe, 20*time.Millisecond)
-	m.Register("p1", "http://example/")
+	m.Register("p1", "http://example/", "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -96,7 +96,7 @@ func TestManager_RunRecordsOnTick(t *testing.T) {
 // a plain read alongside a write trips the race detector. This test pins
 // the manager's concurrency contract.
 func TestManager_ConcurrentRegisterWithRun(t *testing.T) {
-	fakeProbe := func(_ context.Context, _ string) ProbeResult {
+	fakeProbe := func(_ context.Context, _, _ string) ProbeResult {
 		return ProbeResult{Healthy: true, LatencyMs: 1}
 	}
 	m := NewManager(fakeProbe, 1*time.Millisecond)
@@ -110,7 +110,7 @@ func TestManager_ConcurrentRegisterWithRun(t *testing.T) {
 
 	// Register a stream of providers while Run iterates the map.
 	for i := 0; i < 200; i++ {
-		m.Register(fmt.Sprintf("p%d", i), "http://example/")
+		m.Register(fmt.Sprintf("p%d", i), "http://example/", "")
 	}
 	// Also exercise Snapshot concurrently — a read against the same maps.
 	for i := 0; i < 50; i++ {
