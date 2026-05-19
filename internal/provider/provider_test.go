@@ -47,7 +47,7 @@ func TestProvider_OpenAIRequest_BuildsCorrectURLAndHeaders(t *testing.T) {
 	p := &Provider{
 		Name:          "deepseek",
 		Kind:          "deepseek",
-		OpenAIBaseURL: upstream.URL,
+		OpenAIBaseURL: upstream.URL + "/v1", // base URL includes /v1 per OpenAI SDK convention
 		APIKey:        "ds-test-key",
 	}
 
@@ -144,6 +144,29 @@ func TestProvider_OpenAIRequest_BodyByteFidelity(t *testing.T) {
 	}
 	if string(h.gotBody) != string(verbatim) {
 		t.Errorf("body re-encoded:\n  want: %s\n  got:  %s", verbatim, h.gotBody)
+	}
+}
+
+// TestProvider_OpenAIRequest_BaseURLIncludesV1: per OpenAI SDK convention the
+// base URL already contains the version prefix. When stored as
+// "…/v1", the gateway appends only "/chat/completions" — no double /v1.
+func TestProvider_OpenAIRequest_BaseURLIncludesV1(t *testing.T) {
+	h := &recordingHandler{}
+	upstream := httptest.NewServer(h)
+	defer upstream.Close()
+
+	p := &Provider{
+		Name:          "qwen",
+		Kind:          "qwen",
+		OpenAIBaseURL: upstream.URL + "/v1",
+		APIKey:        "qwen-key",
+	}
+	_, err := p.OpenAIRequest(context.Background(), strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("OpenAIRequest: %v", err)
+	}
+	if h.gotURL != "/v1/chat/completions" {
+		t.Errorf("URL: want /v1/chat/completions, got %s", h.gotURL)
 	}
 }
 

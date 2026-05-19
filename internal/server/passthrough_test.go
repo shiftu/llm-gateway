@@ -74,7 +74,7 @@ func TestServer_OpenAIPassthrough_DefaultRoute_ForwardsToProvider(t *testing.T) 
 	upSrv := httptest.NewServer(upstream)
 	defer upSrv.Close()
 
-	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL})
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL + "/v1"})
 	srv := NewServer("gw-token", s)
 	gw := httptest.NewServer(srv.Handler())
 	defer gw.Close()
@@ -119,7 +119,7 @@ func TestServer_OpenAIPassthrough_AliasRewritesModel(t *testing.T) {
 	upSrv := httptest.NewServer(upstream)
 	defer upSrv.Close()
 
-	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL})
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL + "/v1"})
 	if err := s.SetAlias("fast", "deepseek", "deepseek-v4-flash", nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestServer_CrossProtocol_ReturnsNotImplemented(t *testing.T) {
 	upSrv := httptest.NewServer(&mockUpstream{respCT: "application/json", respBody: `{}`})
 	defer upSrv.Close()
 
-	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL})
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL + "/v1"})
 	srv := NewServer("gw-token", s)
 	gw := httptest.NewServer(srv.Handler())
 	defer gw.Close()
@@ -256,7 +256,7 @@ func TestServer_OpenAIPassthrough_SSEStreamFidelity(t *testing.T) {
 	upSrv := httptest.NewServer(upstream)
 	defer upSrv.Close()
 
-	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL})
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL + "/v1"})
 	srv := NewServer("gw-token", s)
 	gw := httptest.NewServer(srv.Handler())
 	defer gw.Close()

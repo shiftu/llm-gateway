@@ -23,6 +23,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -79,7 +80,7 @@ func (p *Provider) OpenAIRequest(ctx context.Context, body io.Reader) (*http.Res
 	if p.OpenAIBaseURL == "" {
 		return nil, ErrProtocolUnsupported
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.OpenAIBaseURL+"/v1/chat/completions", body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(p.OpenAIBaseURL, "/")+"/chat/completions", body)
 	if err != nil {
 		return nil, err
 	}

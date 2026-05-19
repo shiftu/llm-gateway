@@ -19,8 +19,9 @@ func TestRegisterHealthTargets(t *testing.T) {
 		t.Fatalf("store.Open: %v", err)
 	}
 	defer st.Close()
+	// DeepSeek has no /v1 prefix; Qwen follows OpenAI SDK convention (base URL includes /v1).
 	mustAdd(t, st, store.Provider{Name: "deepseek", Kind: "deepseek", OpenAIBaseURL: "https://api.deepseek.com", APIKey: "k1"})
-	mustAdd(t, st, store.Provider{Name: "glm", Kind: "glm", OpenAIBaseURL: "https://open.bigmodel.cn/api/paas", APIKey: "k2"})
+	mustAdd(t, st, store.Provider{Name: "qwen", Kind: "qwen", OpenAIBaseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", APIKey: "k2"})
 	mustAdd(t, st, store.Provider{Name: "anthr-only", Kind: "anthropic", AnthropicBaseURL: "https://api.anthropic.com", APIKey: "k3"})
 
 	type call struct{ url, token string }
@@ -47,8 +48,10 @@ func TestRegisterHealthTargets(t *testing.T) {
 		t.Fatalf("probed calls: want 2, got %d (%v)", len(probed), probed)
 	}
 	wantCalls := map[string]string{
-		"https://api.deepseek.com/v1/models":           "k1",
-		"https://open.bigmodel.cn/api/paas/v1/models": "k2",
+		// DeepSeek stores base URL without /v1; probe appends /models directly.
+		"https://api.deepseek.com/models": "k1",
+		// Qwen follows OpenAI SDK convention: base URL includes /v1.
+		"https://dashscope.aliyuncs.com/compatible-mode/v1/models": "k2",
 	}
 	for _, c := range probed {
 		wantToken, ok := wantCalls[c.url]
