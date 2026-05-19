@@ -108,6 +108,22 @@ export LLM_GATEWAY_PROVIDER_OPENAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4
 llm-gateway start
 ```
 
+**Qwen / DashScope (v0.3)**
+```sh
+export LLM_GATEWAY_PROVIDER_KIND=qwen
+export LLM_GATEWAY_PROVIDER_NAME=qwen-prod
+export LLM_GATEWAY_PROVIDER_API_KEY=<dashscope-key>
+llm-gateway start
+```
+
+**Moonshot / Kimi (v0.3)**
+```sh
+export LLM_GATEWAY_PROVIDER_KIND=moonshot
+export LLM_GATEWAY_PROVIDER_NAME=moonshot-prod
+export LLM_GATEWAY_PROVIDER_API_KEY=<moonshot-key>
+llm-gateway start
+```
+
 For multiple providers, use the MCP `add_provider` tool from your agent chat after the
 gateway is running.
 
@@ -133,22 +149,42 @@ managed through MCP tools.
 The legacy `LLM_GATEWAY_TOKEN` env var is permanent — it always works as a bootstrap
 and lost-key recovery mechanism regardless of what is stored in the config file.
 
-## Encryption at rest (v0.2)
+## Encryption at rest
 
 All provider API keys and MCP bearer tokens stored in SQLite are encrypted with
 AES-256-GCM. The encryption key is auto-generated on first run and stored in
 `./data/encryption.key`.
 
-**Key rotation:** Replace the key file and restart. All previously-encrypted
-values will become unreadable — you must re-enter provider keys and re-issue
-MCP tokens.
+**v0.3: Multi-key rotation (KEK).** Set `LLM_GATEWAY_KEK` to a 32-byte hex key
+to unlock key rotation without data loss. Use MCP tools to rotate:
 
-## Health & monitoring
+```sh
+# Rotate to a new master key (old key stays usable until retired)
+# Your agent does this via MCP:
+# rotate_master_key → rekey_providers → retire_master_key
+```
+
+When `LLM_GATEWAY_KEK` is not set, the gateway falls back to the legacy
+single-key mode (encryption.key file).
+
+## Observability (v0.3)
+
+**OpenTelemetry tracing (opt-in):**
+```sh
+export LLM_GATEWAY_OTEL_ENDPOINT=localhost:4317   # OTLP gRPC
+llm-gateway start
+```
+
+When set, every inbound request gets an OTel span with `http.method` and `http.path`
+attributes. Compatible with Jaeger, Tempo, Honeycomb, and any OTLP-capable backend.
+When the env var is not set, tracing is a no-op (zero overhead).
+
+**Existing endpoints** (unchanged):
 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
-| `GET /healthz` | None | Returns `200 OK` with `{"status":"ok","version":"0.2.0"}` |
-| `GET /metrics` | None | Prometheus-compatible metrics (requests, latency, quotas) |
+| `GET /healthz` | None | Returns `{"status":"ok","version":"..."}` |
+| `GET /metrics` | None | Prometheus-compatible metrics |
 
 ## Routing rules (v0.2)
 
@@ -169,6 +205,49 @@ Example (via MCP tool `set_routing_rule`):
 priority=10, match_field=model, match_value=expensive-model, action=provider=budget-provider
 priority=20, match_field=kind, match_value=anthropic, action=provider=anthropic-fallback
 ```
+
+## Cognitive routing (v0.3)
+
+Cognitive routing scores all eligible providers and picks the best one per request,
+with automatic fallback on errors or rate limits.
+
+**Enable cognitive mode for an alias:**
+```sh
+# Via MCP (your agent does this):
+# set_model_alias name="gpt4" provider="qwen-prod" model="qwen-plus" mode="cognitive"
+```
+
+**Per-team scoring weights:**
+| Dimension | Default | Control via |
+|-----------|---------|-------------|
+| Cost | 40% | `set_routing_weights` |
+| Latency | 30% | `set_routing_weights` |
+| Quality | 20% | `set_routing_weights` |
+| Health | 10% | `set_routing_weights` |
+
+**Explain a routing decision:**
+```sh
+# Retrieve the route trace for any request via MCP:
+# explain_route_trace request_id=<id>
+```
+
+**Fallback policies** — configure automatic fallback on HTTP 429 or 5xx:
+```sh
+# Via MCP: set_fallback_policy trigger=http_429 action=next_best max_chain_depth=3
+```
+
+## Budget limits (v0.3)
+
+Set per-team USD spending caps that block requests when exceeded:
+
+```sh
+# Via MCP (your agent does this):
+# set_budget team_id=<id> period=day usd_limit=10.0
+# set_budget team_id=<id> period=month usd_limit=100.0
+```
+
+When the hard cap is hit, inbound requests return HTTP 429 with error type
+`budget_exceeded`. Use `check_budget` to see current spend vs limit.
 
 ## Audit log (v0.2)
 
@@ -322,6 +401,73 @@ Tools are gated by scope; `ping` is public.
 | `whoami` | Show current identity, scope, and tool availability | `mcp_auditor` |
 | `ping` | Health check — returns gateway version and UTC time | (public) |
 
+**Cognitive routing (v0.3)**
+
+| Tool | Description | Min scope |
+|------|-------------|-----------|
+| `get_provider_health` | SLO snapshot for all providers | `mcp_auditor` |
+| `set_routing_weights` | Set per-team scoring weights (cost/latency/quality/health) | `mcp_admin` |
+| `get_routing_weights` | Read current weights for a team | `mcp_auditor` |
+| `set_fallback_policy` | Configure fallback trigger + chain | `mcp_admin` |
+| `remove_fallback_policy` | Remove a fallback policy | `mcp_admin` |
+| `list_fallback_policies` | List all fallback policies | `mcp_auditor` |
+| `explain_route_trace` | Show the routing decision for a past request | `mcp_auditor` |
+| `set_provider_capability` | Register a capability for a provider (e.g. `tool_use=true`) | `mcp_admin` |
+| `list_provider_capabilities` | List capabilities for a provider | `mcp_auditor` |
+
+**Budget management (v0.3)**
+
+| Tool | Description | Min scope |
+|------|-------------|-----------|
+| `set_budget` | Set a per-team USD spending limit (day or month) | `mcp_admin` |
+| `check_budget` | Check current spend vs budget for a team | `mcp_auditor` |
+| `list_budgets` | List all configured budgets | `mcp_auditor` |
+
+**Key rotation (v0.3)**
+
+| Tool | Description | Min scope |
+|------|-------------|-----------|
+| `rotate_master_key` | Generate a new master key (requires `LLM_GATEWAY_KEK`) | `mcp_super` |
+| `rekey_providers` | Re-encrypt all provider keys under the new master key | `mcp_super` |
+| `retire_master_key` | Mark the old master key as retired | `mcp_super` |
+| `list_master_keys` | List all master keys and their status | `mcp_super` |
+
+**Audit chain (v0.3)**
+
+| Tool | Description | Min scope |
+|------|-------------|-----------|
+| `verify_audit_chain` | Verify SHA-256 hash chain integrity of the audit log | `mcp_auditor` |
+
+## MCP resources (v0.3)
+
+The gateway exposes live data as MCP resources via the `lgw://` URI scheme.
+Any MCP client can call `resources/read` to query:
+
+| URI | Returns |
+|-----|---------|
+| `lgw://teams/{id}/usage` | Token usage rollup |
+| `lgw://teams/{id}/cost` | USD cost rollup |
+| `lgw://teams/{id}/quota` | Quota state |
+| `lgw://teams/{id}/budget` | Budget state |
+| `lgw://requests/{id}` | Full request log + route trace |
+| `lgw://providers` | Provider list + health |
+| `lgw://providers/{name}/health` | Single-provider SLO |
+| `lgw://providers/{name}/capabilities` | Capability set |
+| `lgw://audit?since={iso}` | Audit log slice |
+
+## MCP prompts (v0.3)
+
+Six preset operation prompts available via `prompts/get`:
+
+| Prompt | Inputs | Purpose |
+|--------|--------|---------|
+| `investigate_traffic_spike` | team_id, since | Diagnose unusual traffic |
+| `audit_who_used` | model, since | Compliance trail per model |
+| `cost_review` | team_id, period | Cost breakdown + budget delta |
+| `route_review` | team_id, since | Routing pattern analysis |
+| `provider_health_check` | — | Current SLO snapshot |
+| `add_provider_wizard` | kind | Guided provider setup |
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -337,6 +483,8 @@ Tools are gated by scope; `ping` is public.
 | `LLM_GATEWAY_PERSIST_RPM` | — | Set to `1` to persist RPM counters to SQLite (v0.2) |
 | `LLM_GATEWAY_DB` | `./data/llm-gateway.db` | SQLite database path |
 | `LLM_GATEWAY_ENCRYPTION_KEY` | `./data/encryption.key` | Encryption key file path |
+| `LLM_GATEWAY_OTEL_ENDPOINT` | — | OTLP gRPC endpoint for tracing (e.g. `localhost:4317`); opt-in |
+| `LLM_GATEWAY_KEK` | — | 32-byte hex Key Encryption Key for master key rotation (v0.3); opt-in |
 
 ## Building from source
 
@@ -369,6 +517,31 @@ v0.2 is backward-compatible — no data migration is required.
 | MCP scopes | `mcp_admin` / `mcp_super` | + `mcp_auditor` (read-only) | Issue auditor keys with `issue_api_key` → `scope=mcp_auditor`. Existing keys unchanged. |
 | Health/metrics | None | `/healthz` + `/metrics` | Available immediately; no config. |
 | Docker | Not available | `Dockerfile` + `docker-compose.yml` | `docker compose up -d` |
+
+## Migration from v0.2 → v0.3
+
+v0.3 is backward-compatible — the database auto-migrates on first start.
+
+| Area | v0.2 | v0.3 | Action needed |
+|------|------|------|---------------|
+| Database schema | v7 | v10 | None — auto-migrated on startup |
+| Provider list | DeepSeek, GLM | + Qwen (DashScope), Moonshot | Use `add_provider` MCP tool to register new providers |
+| Encryption | Single master key (encryption.key file) | Multi-key rotation via KEK | None by default; set `LLM_GATEWAY_KEK` to unlock key rotation |
+| Routing | Static aliases only | + cognitive mode (opt-in per alias) | Existing static aliases work unchanged |
+| Fallback | None | Policy-based (opt-in) | Use `set_fallback_policy` to configure |
+| Budget limits | None | Per-team USD caps (opt-in) | Use `set_budget` to configure |
+| OTel tracing | None | OTLP gRPC (opt-in) | Set `LLM_GATEWAY_OTEL_ENDPOINT` |
+| Audit log | Append-only | + SHA-256 hash chain | Automatic; verify with `verify_audit_chain` |
+| MCP resources | None | `lgw://` URI scheme | Available immediately via `resources/list` |
+| MCP prompts | None | 6 preset prompts | Available immediately via `prompts/list` |
+| Helm chart | Not available | `deploy/helm/llm-gateway/` | `helm install llm-gateway ./deploy/helm/llm-gateway` |
+
+**Upgrade steps:**
+1. Replace the binary (`make build` or download a release)
+2. Restart the gateway — SQLite migrates automatically to schema v10
+3. Verify: `curl http://127.0.0.1:7421/healthz` returns `200 OK`
+4. Optional: set `LLM_GATEWAY_KEK` and run `rotate_master_key` to enable key rotation
+5. Optional: set `LLM_GATEWAY_OTEL_ENDPOINT` to enable distributed tracing
 
 ## Design notes
 
