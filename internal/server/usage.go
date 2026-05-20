@@ -64,10 +64,68 @@ func parseBlockingUsage(body []byte, protocol string) capturedUsage {
 	return capturedUsage{}
 }
 
-// parseSSEUsage scans an SSE byte stream and accumulates token counts from
-// usage events. For Anthropic: message_start carries input_tokens,
-// message_delta carries output_tokens. For OpenAI: usage appears in the final
-// data chunk before [DONE] (DeepSeek and most compliant providers include it).
+// applySSEChunkUsage merges token counts from a single parsed SSE data payload
+// into u. Each field is updated independently so split-usage providers (those
+// that report prompt and completion tokens in separate chunks) do not clobber
+// each other's values.
+func applySSEChunkUsage(u *capturedUsage, data []byte, protocol string) {
+	switch protocol {
+	case protocolAnthropic:
+		var chunk struct {
+			Type    string `json:"type"`
+			Message struct {
+				Usage struct {
+					InputTokens int `json:"input_tokens"`
+				} `json:"usage"`
+			} `json:"message"`
+			Usage *struct {
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal(data, &chunk) != nil {
+			return
+		}
+		switch chunk.Type {
+		case "message_start":
+			u.InputTokens = chunk.Message.Usage.InputTokens
+		case "message_delta":
+			if chunk.Usage != nil {
+				u.OutputTokens = chunk.Usage.OutputTokens
+			}
+		}
+	case protocolOpenAI:
+		var chunk struct {
+			Usage *struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+				ReasoningTokens  int `json:"reasoning_tokens"`
+				Details          struct {
+					ReasoningTokens int `json:"reasoning_tokens"`
+				} `json:"completion_tokens_details"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal(data, &chunk) != nil || chunk.Usage == nil {
+			return
+		}
+		if chunk.Usage.PromptTokens > 0 {
+			u.InputTokens = chunk.Usage.PromptTokens
+		}
+		if chunk.Usage.CompletionTokens > 0 {
+			u.OutputTokens = chunk.Usage.CompletionTokens
+		}
+		rt := chunk.Usage.ReasoningTokens
+		if rt == 0 {
+			rt = chunk.Usage.Details.ReasoningTokens
+		}
+		if rt > 0 {
+			u.ReasoningTokens = rt
+		}
+	}
+}
+
+// parseSSEUsage scans a complete SSE byte stream and accumulates token counts.
+// Used in tests and non-streaming analysis paths; streaming requests should
+// call applySSEChunkUsage inline to avoid buffering the full response body.
 func parseSSEUsage(sse []byte, protocol string) capturedUsage {
 	var u capturedUsage
 	sc := bufio.NewScanner(bytes.NewReader(sse))
@@ -80,58 +138,7 @@ func parseSSEUsage(sse []byte, protocol string) capturedUsage {
 		if data == "[DONE]" {
 			break
 		}
-		switch protocol {
-		case protocolAnthropic:
-			var chunk struct {
-				Type    string `json:"type"`
-				Message struct {
-					Usage struct {
-						InputTokens int `json:"input_tokens"`
-					} `json:"usage"`
-				} `json:"message"`
-				Usage *struct {
-					OutputTokens int `json:"output_tokens"`
-				} `json:"usage"`
-			}
-			if json.Unmarshal([]byte(data), &chunk) != nil {
-				continue
-			}
-			switch chunk.Type {
-			case "message_start":
-				u.InputTokens = chunk.Message.Usage.InputTokens
-			case "message_delta":
-				if chunk.Usage != nil {
-					u.OutputTokens = chunk.Usage.OutputTokens
-				}
-			}
-		case protocolOpenAI:
-			var chunk struct {
-				Usage *struct {
-					PromptTokens     int `json:"prompt_tokens"`
-					CompletionTokens int `json:"completion_tokens"`
-					ReasoningTokens  int `json:"reasoning_tokens"`
-					Details          struct {
-						ReasoningTokens int `json:"reasoning_tokens"`
-					} `json:"completion_tokens_details"`
-				} `json:"usage"`
-			}
-			if json.Unmarshal([]byte(data), &chunk) != nil || chunk.Usage == nil {
-				continue
-			}
-			rt := chunk.Usage.ReasoningTokens
-			if rt == 0 {
-				rt = chunk.Usage.Details.ReasoningTokens
-			}
-			// Keep the last non-zero usage chunk (providers may emit null-usage
-			// chunks for intermediate deltas, then a real usage in the final chunk).
-			if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
-				u = capturedUsage{
-					InputTokens:     chunk.Usage.PromptTokens,
-					OutputTokens:    chunk.Usage.CompletionTokens,
-					ReasoningTokens: rt,
-				}
-			}
-		}
+		applySSEChunkUsage(&u, []byte(data), protocol)
 	}
 	return u
 }

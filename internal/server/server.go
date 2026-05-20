@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -372,9 +373,7 @@ func pipeAndCaptureUsage(w http.ResponseWriter, resp *http.Response, protocol st
 	w.WriteHeader(resp.StatusCode)
 
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		var buf bytes.Buffer
-		flushAndCopy(w, io.TeeReader(resp.Body, &buf))
-		return parseSSEUsage(buf.Bytes(), protocol)
+		return pipeSSEAndCaptureUsage(w, resp.Body, protocol)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	_, _ = w.Write(body)
@@ -396,6 +395,40 @@ func flushAndCopy(w http.ResponseWriter, r io.Reader) {
 			return
 		}
 	}
+}
+
+// pipeSSEAndCaptureUsage streams SSE lines to the client while parsing usage
+// inline. Memory cost is O(1) per request — one scanner line buffer shared
+// across all chunks, no full-body accumulation. The 256 KB scanner buffer
+// handles arbitrarily large tool-call or reasoning data lines safely.
+func pipeSSEAndCaptureUsage(w http.ResponseWriter, body io.Reader, protocol string) capturedUsage {
+	flusher, _ := w.(http.Flusher)
+	var u capturedUsage
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 256*1024), 256*1024)
+	for sc.Scan() {
+		raw := sc.Bytes()
+		_, _ = w.Write(raw)
+		_, _ = w.Write([]byte{'\n'})
+		if flusher != nil {
+			flusher.Flush()
+		}
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			// Write the SSE event-terminating blank line before stopping.
+			_, _ = w.Write([]byte{'\n'})
+			if flusher != nil {
+				flusher.Flush()
+			}
+			break
+		}
+		applySSEChunkUsage(&u, []byte(data), protocol)
+	}
+	return u
 }
 
 // writeUpstreamError surfaces a structured error for upstream-side failures
