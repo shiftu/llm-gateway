@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -27,6 +28,7 @@ type UsageCounter struct {
 	InputTokens     int64
 	OutputTokens    int64
 	ReasoningTokens int64
+	CachedTokens    int64 // v12: portion of InputTokens that hit the upstream prompt cache
 	CostUSDMicros   int64
 }
 
@@ -44,15 +46,15 @@ type UsageCounter struct {
 func (s *Store) ReserveQuota(apiKeyID string, dayUTC int64, deltaRequests int64) (UsageCounter, error) {
 	row := s.db.QueryRow(`
 		INSERT INTO usage_counters
-			(api_key_id, day_utc, request_count, input_tokens, output_tokens, reasoning_tokens, cost_usd_micros)
-			VALUES (?, ?, ?, 0, 0, 0, 0)
+			(api_key_id, day_utc, request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cost_usd_micros)
+			VALUES (?, ?, ?, 0, 0, 0, 0, 0)
 		ON CONFLICT(api_key_id, day_utc) DO UPDATE SET
 			request_count = request_count + ?
-		RETURNING request_count, input_tokens, output_tokens, reasoning_tokens, cost_usd_micros`,
+		RETURNING request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cost_usd_micros`,
 		apiKeyID, dayUTC, deltaRequests, deltaRequests,
 	)
 	c := UsageCounter{APIKeyID: apiKeyID, DayUTC: dayUTC}
-	if err := row.Scan(&c.RequestCount, &c.InputTokens, &c.OutputTokens, &c.ReasoningTokens, &c.CostUSDMicros); err != nil {
+	if err := row.Scan(&c.RequestCount, &c.InputTokens, &c.OutputTokens, &c.ReasoningTokens, &c.CachedTokens, &c.CostUSDMicros); err != nil {
 		return UsageCounter{}, err
 	}
 	return c, nil
@@ -61,18 +63,19 @@ func (s *Store) ReserveQuota(apiKeyID string, dayUTC int64, deltaRequests int64)
 // CommitUsage adds token + cost deltas to the counter, seeding the row if
 // reserve was skipped. Called after the upstream response is parsed for
 // real token counts — typically alongside the request_logs INSERT.
-func (s *Store) CommitUsage(apiKeyID string, dayUTC int64, input, output, reasoning int64, costMicros int64) error {
+func (s *Store) CommitUsage(apiKeyID string, dayUTC int64, input, output, reasoning, cached int64, costMicros int64) error {
 	_, err := s.db.Exec(`
 		INSERT INTO usage_counters
-			(api_key_id, day_utc, request_count, input_tokens, output_tokens, reasoning_tokens, cost_usd_micros)
-			VALUES (?, ?, 0, ?, ?, ?, ?)
+			(api_key_id, day_utc, request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cost_usd_micros)
+			VALUES (?, ?, 0, ?, ?, ?, ?, ?)
 		ON CONFLICT(api_key_id, day_utc) DO UPDATE SET
 			input_tokens     = input_tokens     + ?,
 			output_tokens    = output_tokens    + ?,
 			reasoning_tokens = reasoning_tokens + ?,
+			cached_tokens    = cached_tokens    + ?,
 			cost_usd_micros  = cost_usd_micros  + ?`,
-		apiKeyID, dayUTC, input, output, reasoning, costMicros,
-		input, output, reasoning, costMicros,
+		apiKeyID, dayUTC, input, output, reasoning, cached, costMicros,
+		input, output, reasoning, cached, costMicros,
 	)
 	return err
 }
@@ -92,13 +95,13 @@ func (s *Store) SumDayRequests(apiKeyID string, fromDayUTC, toDayUTC int64) (int
 
 func (s *Store) GetUsageCounter(apiKeyID string, dayUTC int64) (UsageCounter, error) {
 	row := s.db.QueryRow(
-		`SELECT api_key_id, day_utc, request_count, input_tokens, output_tokens, reasoning_tokens, cost_usd_micros
+		`SELECT api_key_id, day_utc, request_count, input_tokens, output_tokens, reasoning_tokens, cached_tokens, cost_usd_micros
 		 FROM usage_counters WHERE api_key_id = ? AND day_utc = ?`,
 		apiKeyID, dayUTC,
 	)
 	var c UsageCounter
 	err := row.Scan(&c.APIKeyID, &c.DayUTC, &c.RequestCount,
-		&c.InputTokens, &c.OutputTokens, &c.ReasoningTokens, &c.CostUSDMicros)
+		&c.InputTokens, &c.OutputTokens, &c.ReasoningTokens, &c.CachedTokens, &c.CostUSDMicros)
 	if errors.Is(err, sql.ErrNoRows) {
 		return UsageCounter{}, ErrNotFound
 	}
@@ -106,6 +109,59 @@ func (s *Store) GetUsageCounter(apiKeyID string, dayUTC int64) (UsageCounter, er
 		return UsageCounter{}, err
 	}
 	return c, nil
+}
+
+// UsageDaySummary is one day's usage aggregated across a set of API keys.
+type UsageDaySummary struct {
+	DayUTC          int64
+	RequestCount    int64
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
+	CachedTokens    int64
+	CostUSDMicros   int64
+}
+
+// SummarizeUsageByDay aggregates usage_counters for the given API keys over the
+// half-open range [fromDayUTC, toDayUTC), returning one row per day that had
+// activity, oldest-first. Unlike ListRequestLogs this reads the pre-aggregated
+// daily rollups, so it answers week/month queries accurately and is not subject
+// to any row cap. Returns an empty slice (not ErrNotFound) when there is no usage.
+func (s *Store) SummarizeUsageByDay(apiKeyIDs []string, fromDayUTC, toDayUTC int64) ([]UsageDaySummary, error) {
+	if len(apiKeyIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(apiKeyIDs)), ",")
+	args := make([]any, 0, len(apiKeyIDs)+2)
+	for _, id := range apiKeyIDs {
+		args = append(args, id)
+	}
+	args = append(args, fromDayUTC, toDayUTC)
+	rows, err := s.db.Query(`
+		SELECT day_utc,
+		       SUM(request_count), SUM(input_tokens), SUM(output_tokens),
+		       SUM(reasoning_tokens), SUM(cached_tokens), SUM(cost_usd_micros)
+		FROM usage_counters
+		WHERE api_key_id IN (`+placeholders+`) AND day_utc >= ? AND day_utc < ?
+		GROUP BY day_utc
+		ORDER BY day_utc ASC`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []UsageDaySummary
+	for rows.Next() {
+		var d UsageDaySummary
+		if err := rows.Scan(&d.DayUTC, &d.RequestCount, &d.InputTokens,
+			&d.OutputTokens, &d.ReasoningTokens, &d.CachedTokens, &d.CostUSDMicros); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
 
 // --- ModelCost ---

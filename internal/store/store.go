@@ -24,15 +24,17 @@ import (
 )
 
 const (
-	// schemaVersion = 11: v11 adds model_costs.usd_per_cached_1k and
-	// request_logs.cached_tokens for prompt-cache pricing (charaboard).
+	// schemaVersion = 12: v12 adds usage_counters.cached_tokens so the daily
+	// rollups carry prompt-cache hits (week/month usage summaries report cache rate).
+	// v11 added model_costs.usd_per_cached_1k and request_logs.cached_tokens
+	// for prompt-cache pricing (charaboard).
 	// v10 added master_keys table (v0.3 T17).
 	// v9 added budgets table (v0.3 T16).
 	// v8 added admin_audit hash chain columns (v0.3 T22).
 	// v7 added provider_capabilities (v0.3 T11).
 	// v6 added fallback_policies (v0.3 T4).
 	// v5 added request_logs.route_trace (v0.3 T5).
-	schemaVersion           = 11
+	schemaVersion           = 12
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -347,6 +349,12 @@ CREATE TABLE IF NOT EXISTS master_keys (
 	`
 ALTER TABLE model_costs  ADD COLUMN usd_per_cached_1k REAL;
 ALTER TABLE request_logs ADD COLUMN cached_tokens     INTEGER;
+`,
+
+	// v11 → v12: carry prompt-cache hits into the daily rollup so week/month
+	// usage summaries can report a cache-hit rate without scanning request_logs.
+	`
+ALTER TABLE usage_counters ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0;
 `,
 }
 

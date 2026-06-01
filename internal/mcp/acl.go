@@ -37,15 +37,16 @@ var registry = map[string]string{
 	"list_model_costs":     "mcp_auditor",
 
 	// tenancy tools
-	"add_team":        "mcp_super",
-	"list_teams":      "mcp_auditor",
-	"issue_api_key":   "mcp_super",
-	"revoke_api_key":  "mcp_super",
-	"list_api_keys":   "mcp_auditor",
-	"set_quota":       "mcp_super",
-	"get_quota":       "mcp_auditor",
-	"list_quotas":     "mcp_auditor",
+	"add_team":          "mcp_super",
+	"list_teams":        "mcp_auditor",
+	"issue_api_key":     "mcp_super",
+	"revoke_api_key":    "mcp_super",
+	"list_api_keys":     "mcp_auditor",
+	"set_quota":         "mcp_super",
+	"get_quota":         "mcp_auditor",
+	"list_quotas":       "mcp_auditor",
 	"list_request_logs": "mcp_auditor",
+	"get_usage_summary": "mcp_auditor",
 
 	"set_team_model_alias":    "mcp_admin",
 	"delete_team_model_alias": "mcp_admin",
@@ -81,9 +82,9 @@ var registry = map[string]string{
 	"verify_audit_chain": "mcp_auditor",
 
 	// Per-team budget limits (v0.3 T16)
-	"set_budget":    "mcp_admin",
-	"check_budget":  "mcp_auditor",
-	"list_budgets":  "mcp_auditor",
+	"set_budget":   "mcp_admin",
+	"check_budget": "mcp_auditor",
+	"list_budgets": "mcp_auditor",
 
 	// Master key management (v0.3 T17)
 	"rotate_master_key": "mcp_super",

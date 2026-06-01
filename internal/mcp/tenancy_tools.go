@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/panda/llm-gateway/internal/store"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/panda/llm-gateway/internal/store"
 )
 
-// RegisterTenancyTools adds the 11 team + API-key + quota + team-alias tools to s.
+// RegisterTenancyTools adds the team + API-key + quota + usage + team-alias tools to s.
 // Team/key issuance require mcp_super; list/get/alias ops require mcp_admin.
 func RegisterTenancyTools(s *mcpserver.MCPServer, st *store.Store) {
 	s.AddTool(
@@ -89,6 +89,17 @@ func RegisterTenancyTools(s *mcpserver.MCPServer, st *store.Store) {
 			mcplib.WithNumber("limit", mcplib.Description("Max rows to return (1–200, default 50)")),
 		),
 		listRequestLogsHandler(st),
+	)
+	s.AddTool(
+		mcplib.NewTool("get_usage_summary",
+			mcplib.WithDescription("Aggregated token + cost usage over a date range, from the daily rollups (usage_counters) — NOT subject to the 200-row cap of list_request_logs. Use this for weekly/monthly reports. Returns a per-day breakdown plus totals. Scope by team_slug (sums all the team's keys) or a single key_id."),
+			mcplib.WithString("team_slug", mcplib.Description("Sum usage across all API keys of this team. Provide this OR key_id.")),
+			mcplib.WithString("key_id", mcplib.Description("Restrict to a single API key ID ak_xxxx. Provide this OR team_slug.")),
+			mcplib.WithNumber("days", mcplib.Description("Trailing window length in days, ending today (UTC), inclusive. Default 7. Ignored when from_date is set.")),
+			mcplib.WithString("from_date", mcplib.Description("Start day (inclusive), YYYY-MM-DD UTC. Overrides days when set.")),
+			mcplib.WithString("to_date", mcplib.Description("End day (inclusive), YYYY-MM-DD UTC. Defaults to today.")),
+		),
+		getUsageSummaryHandler(st),
 	)
 	s.AddTool(
 		mcplib.NewTool("set_team_model_alias",
@@ -654,5 +665,142 @@ func pruneAuditLogHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 		audit(st, "prune_audit_log", "admin_audit", fmt.Sprintf("before_%dd", beforeDays), map[string]int64{"deleted": n})
 		out, _ := json.Marshal(map[string]any{"ok": true, "deleted": n, "before_days": beforeDays})
 		return mcplib.NewToolResultText(string(out)), nil
+	}
+}
+
+const msPerDay int64 = 24 * 60 * 60 * 1000
+
+// parseDayUTC turns a YYYY-MM-DD string into the ms-epoch of 00:00 UTC on that day.
+func parseDayUTC(s string) (int64, error) {
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return 0, err
+	}
+	return t.UTC().UnixMilli(), nil
+}
+
+func getUsageSummaryHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "get_usage_summary"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		teamSlug := req.GetString("team_slug", "")
+		keyID := req.GetString("key_id", "")
+
+		// Resolve the set of API keys to aggregate over.
+		var keyIDs []string
+		var scope string
+		switch {
+		case keyID != "":
+			keyIDs = []string{keyID}
+			scope = "key:" + keyID
+		case teamSlug != "":
+			team, err := st.GetTeamBySlug(teamSlug)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return mcplib.NewToolResultError("team not found: " + teamSlug), nil
+				}
+				return mcplib.NewToolResultError("get_usage_summary: " + err.Error()), nil
+			}
+			keys, err := st.ListAPIKeysByTeam(team.ID)
+			if err != nil {
+				return mcplib.NewToolResultError("get_usage_summary: " + err.Error()), nil
+			}
+			for _, k := range keys {
+				keyIDs = append(keyIDs, k.ID)
+			}
+			scope = "team:" + teamSlug
+		default:
+			return mcplib.NewToolResultError("provide either team_slug or key_id"), nil
+		}
+
+		// Resolve the half-open day range [from, toExclusive).
+		now := time.Now().UTC()
+		y, m, d := now.Date()
+		todayMid := time.Date(y, m, d, 0, 0, 0, 0, time.UTC).UnixMilli()
+
+		toExclusive := todayMid + msPerDay
+		if v := req.GetString("to_date", ""); v != "" {
+			t, err := parseDayUTC(v)
+			if err != nil {
+				return mcplib.NewToolResultError("invalid to_date (want YYYY-MM-DD): " + err.Error()), nil
+			}
+			toExclusive = t + msPerDay
+		}
+
+		var from int64
+		if v := req.GetString("from_date", ""); v != "" {
+			t, err := parseDayUTC(v)
+			if err != nil {
+				return mcplib.NewToolResultError("invalid from_date (want YYYY-MM-DD): " + err.Error()), nil
+			}
+			from = t
+		} else {
+			days := req.GetInt("days", 7)
+			if days <= 0 {
+				days = 7
+			}
+			from = toExclusive - int64(days)*msPerDay
+		}
+		if from >= toExclusive {
+			return mcplib.NewToolResultError("from_date must be on or before to_date"), nil
+		}
+
+		summary, err := st.SummarizeUsageByDay(keyIDs, from, toExclusive)
+		if err != nil {
+			return mcplib.NewToolResultError("get_usage_summary failed: " + err.Error()), nil
+		}
+
+		type dayRow struct {
+			Date            string  `json:"date"`
+			Requests        int64   `json:"requests"`
+			InputTokens     int64   `json:"input_tokens"`
+			OutputTokens    int64   `json:"output_tokens"`
+			ReasoningTokens int64   `json:"reasoning_tokens,omitempty"`
+			CachedTokens    int64   `json:"cached_tokens,omitempty"`
+			CostUSD         float64 `json:"cost_usd"`
+		}
+		days := make([]dayRow, 0, len(summary))
+		var tReq, tIn, tOut, tReason, tCached, tCostMicros int64
+		for _, s := range summary {
+			days = append(days, dayRow{
+				Date:            time.UnixMilli(s.DayUTC).UTC().Format("2006-01-02"),
+				Requests:        s.RequestCount,
+				InputTokens:     s.InputTokens,
+				OutputTokens:    s.OutputTokens,
+				ReasoningTokens: s.ReasoningTokens,
+				CachedTokens:    s.CachedTokens,
+				CostUSD:         float64(s.CostUSDMicros) / 1e6,
+			})
+			tReq += s.RequestCount
+			tIn += s.InputTokens
+			tOut += s.OutputTokens
+			tReason += s.ReasoningTokens
+			tCached += s.CachedTokens
+			tCostMicros += s.CostUSDMicros
+		}
+
+		var cacheRate float64
+		if tIn > 0 {
+			cacheRate = float64(tCached) / float64(tIn)
+		}
+		resp := map[string]any{
+			"scope":     scope,
+			"from_date": time.UnixMilli(from).UTC().Format("2006-01-02"),
+			"to_date":   time.UnixMilli(toExclusive - msPerDay).UTC().Format("2006-01-02"),
+			"keys":      len(keyIDs),
+			"days":      days,
+			"totals": map[string]any{
+				"requests":         tReq,
+				"input_tokens":     tIn,
+				"output_tokens":    tOut,
+				"reasoning_tokens": tReason,
+				"cached_tokens":    tCached,
+				"cost_usd":         float64(tCostMicros) / 1e6,
+				"cache_hit_rate":   cacheRate,
+			},
+		}
+		b, _ := json.Marshal(resp)
+		return mcplib.NewToolResultText(string(b)), nil
 	}
 }

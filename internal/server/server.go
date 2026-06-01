@@ -271,7 +271,8 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 			dayUTC := truncateToDay(time.Now().UTC())
 			costMicros := calcCostMicros(s.store, route.Provider.Name, route.UpstreamModel, u)
 			_ = s.store.CommitUsage(ak.ID, dayUTC,
-				int64(u.InputTokens), int64(u.OutputTokens), int64(u.ReasoningTokens), costMicros)
+				int64(u.InputTokens), int64(u.OutputTokens), int64(u.ReasoningTokens),
+				int64(u.CachedTokens), costMicros)
 		}
 	}
 	s.logRequest(rl)

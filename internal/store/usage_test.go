@@ -83,10 +83,10 @@ func TestUsage_CommitUsage_AddsTokensAndCost(t *testing.T) {
 	day := dayUTC(time.Now())
 
 	_, _ = s.ReserveQuota(ak.ID, day, 1)
-	if err := s.CommitUsage(ak.ID, day, 100, 50, 20, 75_000); err != nil {
+	if err := s.CommitUsage(ak.ID, day, 100, 50, 20, 0, 75_000); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CommitUsage(ak.ID, day, 200, 100, 0, 125_000); err != nil {
+	if err := s.CommitUsage(ak.ID, day, 200, 100, 0, 0, 125_000); err != nil {
 		t.Fatal(err)
 	}
 	c, _ := s.GetUsageCounter(ak.ID, day)
@@ -109,7 +109,7 @@ func TestUsage_CommitWithoutReserve_SeedsRow(t *testing.T) {
 	ak, _, _ := s.IssueAPIKey(tm.ID, "inbound", "")
 	day := dayUTC(time.Now())
 
-	if err := s.CommitUsage(ak.ID, day, 10, 5, 0, 1000); err != nil {
+	if err := s.CommitUsage(ak.ID, day, 10, 5, 0, 0, 1000); err != nil {
 		t.Fatal(err)
 	}
 	c, _ := s.GetUsageCounter(ak.ID, day)
@@ -209,3 +209,70 @@ func dayUTC(t time.Time) int64 {
 	y, m, d := t.UTC().Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC).UnixMilli()
 }
+
+// TestUsage_CachedTokens_RoundTrip (v12): cached tokens committed to the daily
+// counter must accumulate and survive a GetUsageCounter read.
+func TestUsage_CachedTokens_RoundTrip(t *testing.T) {
+	s := openTest(t)
+	tm, _ := s.AddTeam("acme", "A")
+	ak, _, _ := s.IssueAPIKey(tm.ID, "inbound", "")
+	day := dayUTC(time.Now())
+
+	if err := s.CommitUsage(ak.ID, day, 1000, 100, 0, 800, 50_000); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CommitUsage(ak.ID, day, 500, 50, 0, 300, 25_000); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := s.GetUsageCounter(ak.ID, day)
+	if c.CachedTokens != 1100 {
+		t.Errorf("cached tokens should accumulate to 1100, got %d", c.CachedTokens)
+	}
+}
+
+// TestUsage_SummarizeUsageByDay aggregates across multiple keys and days,
+// returns oldest-first, and carries cached tokens + cost through the rollup.
+func TestUsage_SummarizeUsageByDay(t *testing.T) {
+	s := openTest(t)
+	tm, _ := s.AddTeam("acme", "A")
+	ak1, _, _ := s.IssueAPIKey(tm.ID, "inbound", "")
+	ak2, _, _ := s.IssueAPIKey(tm.ID, "inbound", "")
+
+	day0 := dayUTC(time.Now())
+	day1 := day0 - msPerDayTest
+	day2 := day0 - 2*msPerDayTest
+
+	// day1: two keys both active.
+	_ = s.CommitUsage(ak1.ID, day1, 1000, 100, 0, 800, 50_000)
+	_ = s.CommitUsage(ak2.ID, day1, 500, 50, 0, 0, 25_000)
+	// day0: one key, with reasoning + cached.
+	_ = s.CommitUsage(ak1.ID, day0, 200, 20, 10, 100, 10_000)
+
+	// Half-open range [day2, day0+1day) → day1 and day0 are active, day2 empty.
+	rows, err := s.SummarizeUsageByDay([]string{ak1.ID, ak2.ID}, day2, day0+msPerDayTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 active days, got %d: %+v", len(rows), rows)
+	}
+	// Oldest-first.
+	if rows[0].DayUTC != day1 {
+		t.Errorf("rows[0] should be day1=%d, got %d", day1, rows[0].DayUTC)
+	}
+	if rows[0].InputTokens != 1500 || rows[0].OutputTokens != 150 ||
+		rows[0].CachedTokens != 800 || rows[0].CostUSDMicros != 75_000 {
+		t.Errorf("day1 aggregate across both keys wrong: %+v", rows[0])
+	}
+	if rows[1].DayUTC != day0 || rows[1].ReasoningTokens != 10 || rows[1].CachedTokens != 100 {
+		t.Errorf("day0 aggregate wrong: %+v", rows[1])
+	}
+
+	// Empty key set → no rows, no error.
+	empty, err := s.SummarizeUsageByDay(nil, day2, day0+msPerDayTest)
+	if err != nil || len(empty) != 0 {
+		t.Errorf("empty key set should return (nil, nil), got (%+v, %v)", empty, err)
+	}
+}
+
+const msPerDayTest int64 = 24 * 60 * 60 * 1000
