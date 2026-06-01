@@ -67,7 +67,7 @@ func TestResourceTeamUsage_HappyPath(t *testing.T) {
 
 	// Seed usage for today.
 	today := todayUTC()
-	if err := st.CommitUsage(ak.ID, today, 100, 50, 10, 5000); err != nil {
+	if err := st.CommitUsage(ak.ID, today, 100, 50, 10, 0, 5000); err != nil {
 		t.Fatalf("CommitUsage: %v", err)
 	}
 

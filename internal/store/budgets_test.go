@@ -169,7 +169,7 @@ func TestCheckBudget_UnderLimit(t *testing.T) {
 	now := time.Now().UTC()
 	day := dayUTC(now)
 	// spend $0.10 = 100_000 micros, limit $1.00
-	if err := s.CommitUsage(ak.ID, day, 0, 0, 0, 100_000); err != nil {
+	if err := s.CommitUsage(ak.ID, day, 0, 0, 0, 0, 100_000); err != nil {
 		t.Fatalf("CommitUsage: %v", err)
 	}
 	budget := Budget{
@@ -204,7 +204,7 @@ func TestCheckBudget_SoftBreach(t *testing.T) {
 	now := time.Now().UTC()
 	day := dayUTC(now)
 	// spend $0.85 = 850_000 micros, limit $1.00 → 85% → soft breach at 80%
-	if err := s.CommitUsage(ak.ID, day, 0, 0, 0, 850_000); err != nil {
+	if err := s.CommitUsage(ak.ID, day, 0, 0, 0, 0, 850_000); err != nil {
 		t.Fatalf("CommitUsage: %v", err)
 	}
 	budget := Budget{
@@ -239,7 +239,7 @@ func TestCheckBudget_HardBreach(t *testing.T) {
 	now := time.Now().UTC()
 	day := dayUTC(now)
 	// spend $1.20 = 1_200_000 micros, limit $1.00 → 120% → hard breach with action=block
-	if err := s.CommitUsage(ak.ID, day, 0, 0, 0, 1_200_000); err != nil {
+	if err := s.CommitUsage(ak.ID, day, 0, 0, 0, 0, 1_200_000); err != nil {
 		t.Fatalf("CommitUsage: %v", err)
 	}
 	budget := Budget{
@@ -278,7 +278,7 @@ func TestCheckBudget_HardBreach_WarnAction_NotBlocked(t *testing.T) {
 	now := time.Now().UTC()
 	day := dayUTC(now)
 	// overspend but action=warn → HardBreached should be false (only block triggers hard)
-	if err := s.CommitUsage(ak.ID, day, 0, 0, 0, 2_000_000); err != nil {
+	if err := s.CommitUsage(ak.ID, day, 0, 0, 0, 0, 2_000_000); err != nil {
 		t.Fatalf("CommitUsage: %v", err)
 	}
 	budget := Budget{
