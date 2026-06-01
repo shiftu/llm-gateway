@@ -218,3 +218,106 @@ func TestCalcCostMicros_ZeroTokens_ReturnsZero(t *testing.T) {
 		t.Errorf("zero tokens should yield zero cost, got %d", got)
 	}
 }
+
+// --- cached_tokens parsing (v11) ---
+
+func TestParseBlockingUsage_OpenAI_CachedTokens(t *testing.T) {
+	body := []byte(`{"usage":{"prompt_tokens":1000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":800}}}`)
+	u := parseBlockingUsage(body, protocolOpenAI)
+	if u.InputTokens != 1000 || u.OutputTokens != 50 || u.CachedTokens != 800 {
+		t.Errorf("got %+v, want {Input:1000 Output:50 Cached:800}", u)
+	}
+}
+
+func TestParseBlockingUsage_Anthropic_CacheRead(t *testing.T) {
+	body := []byte(`{"usage":{"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":900}}`)
+	u := parseBlockingUsage(body, protocolAnthropic)
+	if u.InputTokens != 1200 || u.OutputTokens != 80 || u.CachedTokens != 900 {
+		t.Errorf("got %+v, want {Input:1200 Output:80 Cached:900}", u)
+	}
+}
+
+func TestParseSSEUsage_OpenAI_CachedTokens(t *testing.T) {
+	sse := []byte(
+		"data: " + `{"choices":[{"delta":{"content":"x"}}],"usage":null}` + "\n\n" +
+			"data: " + `{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":500,"completion_tokens":40,"prompt_tokens_details":{"cached_tokens":300}}}` + "\n\n" +
+			"data: [DONE]\n\n",
+	)
+	u := parseSSEUsage(sse, protocolOpenAI)
+	if u.InputTokens != 500 || u.OutputTokens != 40 || u.CachedTokens != 300 {
+		t.Errorf("got %+v, want {Input:500 Output:40 Cached:300}", u)
+	}
+}
+
+func TestParseSSEUsage_Anthropic_CacheReadInMessageStart(t *testing.T) {
+	sse := []byte(
+		`data: {"type":"message_start","message":{"usage":{"input_tokens":600,"cache_read_input_tokens":450}}}` + "\n\n" +
+			`data: {"type":"message_delta","usage":{"output_tokens":30}}` + "\n\n",
+	)
+	u := parseSSEUsage(sse, protocolAnthropic)
+	if u.InputTokens != 600 || u.OutputTokens != 30 || u.CachedTokens != 450 {
+		t.Errorf("got %+v, want {Input:600 Output:30 Cached:450}", u)
+	}
+}
+
+// --- calcCostMicros cache pricing (v11) ---
+
+func TestCalcCostMicros_CachedAtDiscountedRate(t *testing.T) {
+	st := openUsageTestStore(t)
+	cachedRate := 0.0001
+	_ = st.SetModelCost(store.ModelCost{
+		Provider:       "charaboard-gemini35-flash",
+		Model:          "Google: Gemini 3.5 Flash",
+		USDPerInput1k:  0.001,
+		USDPerOutput1k: 0.002,
+		USDPerCached1k: &cachedRate,
+		EffectiveFrom:  time.Now().Add(-time.Hour),
+	})
+	u := capturedUsage{InputTokens: 1000, OutputTokens: 0, CachedTokens: 800}
+	got := calcCostMicros(st, "charaboard-gemini35-flash", "Google: Gemini 3.5 Flash", u)
+	// uncached: 200 × 0.001 / 1000 = $0.0002 = 200 micros
+	// cached:   800 × 0.0001 / 1000 = $0.00008 = 80 micros
+	// total = 280 micros
+	if got != 280 {
+		t.Errorf("expected 280 micros, got %d", got)
+	}
+}
+
+func TestCalcCostMicros_CachedFallsBackToInputRate(t *testing.T) {
+	st := openUsageTestStore(t)
+	_ = st.SetModelCost(store.ModelCost{
+		Provider:       "deepseek",
+		Model:          "deepseek-v4-flash",
+		USDPerInput1k:  0.001,
+		USDPerOutput1k: 0.002,
+		EffectiveFrom:  time.Now().Add(-time.Hour),
+	})
+	u := capturedUsage{InputTokens: 1000, OutputTokens: 0, CachedTokens: 500}
+	got := calcCostMicros(st, "deepseek", "deepseek-v4-flash", u)
+	// No USDPerCached1k → cached billed at input rate, same as the pre-v11 formula
+	// 1000 × 0.001 / 1000 = 1000 micros
+	if got != 1000 {
+		t.Errorf("expected 1000 micros (cached falls back to input rate), got %d", got)
+	}
+}
+
+func TestCalcCostMicros_CachedClampedToInputTokens(t *testing.T) {
+	st := openUsageTestStore(t)
+	cachedRate := 0.0001
+	_ = st.SetModelCost(store.ModelCost{
+		Provider:       "charaboard-gpt52",
+		Model:          "OpenAI: GPT-5.2 Chat",
+		USDPerInput1k:  0.001,
+		USDPerOutput1k: 0.002,
+		USDPerCached1k: &cachedRate,
+		EffectiveFrom:  time.Now().Add(-time.Hour),
+	})
+	// Defensive case: upstream reports cached=999 with input=500.
+	// Clamp to input → all 500 priced at cached rate, uncached=0.
+	u := capturedUsage{InputTokens: 500, OutputTokens: 0, CachedTokens: 999}
+	got := calcCostMicros(st, "charaboard-gpt52", "OpenAI: GPT-5.2 Chat", u)
+	// 500 × 0.0001 / 1000 = 50 micros (no negative uncached charge)
+	if got != 50 {
+		t.Errorf("expected 50 micros (cached clamped), got %d", got)
+	}
+}

@@ -81,6 +81,7 @@ func RegisterProviderTools(s *mcpserver.MCPServer, st *store.Store) {
 			mcplib.WithNumber("usd_per_input_1k", mcplib.Required(), mcplib.Description("Input token price in USD per 1K tokens")),
 			mcplib.WithNumber("usd_per_output_1k", mcplib.Required(), mcplib.Description("Output token price in USD per 1K tokens")),
 			mcplib.WithNumber("usd_per_reasoning_1k", mcplib.Description("Reasoning token price in USD per 1K tokens (optional, for reasoning models)")),
+			mcplib.WithNumber("usd_per_cached_1k", mcplib.Description("Prompt-cache hit price in USD per 1K tokens (optional, for prompt-caching models). Cached portion of prompt_tokens bills at this rate; uncached portion bills at usd_per_input_1k.")),
 		),
 		setModelCostHandler(st),
 	)
@@ -312,24 +313,32 @@ func setModelCostHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			return mcplib.NewToolResultError("usd_per_input_1k and usd_per_output_1k must be > 0"), nil
 		}
 		c := store.ModelCost{
-			Provider:      provider,
-			Model:         model,
-			USDPerInput1k: inputRaw,
+			Provider:       provider,
+			Model:          model,
+			USDPerInput1k:  inputRaw,
 			USDPerOutput1k: outputRaw,
-			EffectiveFrom: time.Now(),
+			EffectiveFrom:  time.Now(),
 		}
 		if r := req.GetFloat("usd_per_reasoning_1k", 0); r > 0 {
 			v := r
 			c.USDPerReasoning1k = &v
 		}
+		if r := req.GetFloat("usd_per_cached_1k", 0); r > 0 {
+			v := r
+			c.USDPerCached1k = &v
+		}
 		if err := st.SetModelCost(c); err != nil {
 			return mcplib.NewToolResultError("set_model_cost failed: " + err.Error()), nil
 		}
 		audit(st, "set_model_cost", "model_cost", provider+"/"+model, nil)
-		out, _ := json.Marshal(map[string]any{
+		resp := map[string]any{
 			"ok": true, "provider": provider, "model": model,
 			"usd_per_input_1k": inputRaw, "usd_per_output_1k": outputRaw,
-		})
+		}
+		if c.USDPerCached1k != nil {
+			resp["usd_per_cached_1k"] = *c.USDPerCached1k
+		}
+		out, _ := json.Marshal(resp)
 		return mcplib.NewToolResultText(string(out)), nil
 	}
 }
@@ -349,6 +358,7 @@ func listModelCostsHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			USDPerInput1k     float64  `json:"usd_per_input_1k"`
 			USDPerOutput1k    float64  `json:"usd_per_output_1k"`
 			USDPerReasoning1k *float64 `json:"usd_per_reasoning_1k,omitempty"`
+			USDPerCached1k    *float64 `json:"usd_per_cached_1k,omitempty"`
 			EffectiveFrom     int64    `json:"effective_from"`
 		}
 		out := make([]row, len(costs))
@@ -359,6 +369,7 @@ func listModelCostsHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 				USDPerInput1k:     c.USDPerInput1k,
 				USDPerOutput1k:    c.USDPerOutput1k,
 				USDPerReasoning1k: c.USDPerReasoning1k,
+				USDPerCached1k:    c.USDPerCached1k,
 				EffectiveFrom:     c.EffectiveFrom.Unix(),
 			}
 		}

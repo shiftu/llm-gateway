@@ -14,7 +14,7 @@ import (
 
 // fakeProbe returns a fixed-result ProbeFn used for handler tests.
 func fakeProbe(latencyMs int64, healthy bool) health.ProbeFn {
-	return func(_ context.Context, _ string) health.ProbeResult {
+	return func(_ context.Context, _, _ string) health.ProbeResult {
 		return health.ProbeResult{Healthy: healthy, LatencyMs: latencyMs, StatusCode: 200}
 	}
 }
@@ -24,7 +24,7 @@ func fakeProbe(latencyMs int64, healthy bool) health.ProbeFn {
 // mcp_auditor scope (this is a read-only observability tool).
 func TestGetProviderHealth_SingleProvider(t *testing.T) {
 	mgr := health.NewManager(fakeProbe(42, true), time.Minute)
-	mgr.Register("deepseek", "https://api.deepseek.com/v1/models")
+	mgr.Register("deepseek", "https://api.deepseek.com/v1/models", "")
 	if err := mgr.Bootstrap(context.Background()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}

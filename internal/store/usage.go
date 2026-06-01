@@ -114,25 +114,28 @@ func (s *Store) GetUsageCounter(apiKeyID string, dayUTC int64) (UsageCounter, er
 // (matching the published provider rate cards); effective_from establishes
 // the time boundary for historical accuracy in cost reconciliation.
 type ModelCost struct {
-	Provider           string
-	Model              string
-	USDPerInput1k      float64
-	USDPerOutput1k     float64
-	USDPerReasoning1k  *float64 // nil = same as output (most providers)
-	EffectiveFrom      time.Time
+	Provider          string
+	Model             string
+	USDPerInput1k     float64
+	USDPerOutput1k    float64
+	USDPerReasoning1k *float64 // nil = same as output (most providers)
+	USDPerCached1k    *float64 // nil = no cache discount, cached tokens billed at input rate
+	EffectiveFrom     time.Time
 }
 
 func (s *Store) SetModelCost(c ModelCost) error {
 	_, err := s.db.Exec(`
 		INSERT INTO model_costs
-			(provider, model, usd_per_input_1k, usd_per_output_1k, usd_per_reasoning_1k, effective_from)
-			VALUES (?, ?, ?, ?, ?, ?)
+			(provider, model, usd_per_input_1k, usd_per_output_1k, usd_per_reasoning_1k, usd_per_cached_1k, effective_from)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(provider, model, effective_from) DO UPDATE SET
 			usd_per_input_1k     = excluded.usd_per_input_1k,
 			usd_per_output_1k    = excluded.usd_per_output_1k,
-			usd_per_reasoning_1k = excluded.usd_per_reasoning_1k`,
+			usd_per_reasoning_1k = excluded.usd_per_reasoning_1k,
+			usd_per_cached_1k    = excluded.usd_per_cached_1k`,
 		c.Provider, c.Model, c.USDPerInput1k, c.USDPerOutput1k,
-		nullFloat64(c.USDPerReasoning1k), c.EffectiveFrom.UnixMilli(),
+		nullFloat64(c.USDPerReasoning1k), nullFloat64(c.USDPerCached1k),
+		c.EffectiveFrom.UnixMilli(),
 	)
 	return err
 }
@@ -141,7 +144,7 @@ func (s *Store) SetModelCost(c ModelCost) error {
 // Returns ErrNotFound if no row was effective at that point in time.
 func (s *Store) GetModelCost(provider, model string, asOf time.Time) (ModelCost, error) {
 	row := s.db.QueryRow(`
-		SELECT provider, model, usd_per_input_1k, usd_per_output_1k, usd_per_reasoning_1k, effective_from
+		SELECT provider, model, usd_per_input_1k, usd_per_output_1k, usd_per_reasoning_1k, usd_per_cached_1k, effective_from
 		FROM model_costs
 		WHERE provider = ? AND model = ? AND effective_from <= ?
 		ORDER BY effective_from DESC LIMIT 1`,
@@ -152,7 +155,7 @@ func (s *Store) GetModelCost(provider, model string, asOf time.Time) (ModelCost,
 
 func (s *Store) ListModelCosts() ([]ModelCost, error) {
 	rows, err := s.db.Query(`
-		SELECT provider, model, usd_per_input_1k, usd_per_output_1k, usd_per_reasoning_1k, effective_from
+		SELECT provider, model, usd_per_input_1k, usd_per_output_1k, usd_per_reasoning_1k, usd_per_cached_1k, effective_from
 		FROM model_costs ORDER BY provider ASC, model ASC, effective_from ASC`)
 	if err != nil {
 		return nil, err
@@ -171,9 +174,9 @@ func (s *Store) ListModelCosts() ([]ModelCost, error) {
 
 func scanModelCost(r rowScanner) (ModelCost, error) {
 	var c ModelCost
-	var reasoning sql.NullFloat64
+	var reasoning, cached sql.NullFloat64
 	var effective int64
-	err := r.Scan(&c.Provider, &c.Model, &c.USDPerInput1k, &c.USDPerOutput1k, &reasoning, &effective)
+	err := r.Scan(&c.Provider, &c.Model, &c.USDPerInput1k, &c.USDPerOutput1k, &reasoning, &cached, &effective)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ModelCost{}, ErrNotFound
 	}
@@ -183,6 +186,10 @@ func scanModelCost(r rowScanner) (ModelCost, error) {
 	if reasoning.Valid {
 		v := reasoning.Float64
 		c.USDPerReasoning1k = &v
+	}
+	if cached.Valid {
+		v := cached.Float64
+		c.USDPerCached1k = &v
 	}
 	c.EffectiveFrom = time.UnixMilli(effective)
 	return c, nil

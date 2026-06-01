@@ -234,6 +234,60 @@ func TestLog_InsertAndTail(t *testing.T) {
 	}
 }
 
+// TestLog_CachedTokens_RoundTrip covers the v11 schema addition: cached_tokens
+// must survive the LogRequest → GetRequestLog round trip and propagate through
+// ListRequestLogs scans. Zero-value old rows still scan cleanly as 0.
+func TestLog_CachedTokens_RoundTrip(t *testing.T) {
+	s := openTest(t)
+	_ = s.AddProvider(Provider{Name: "charaboard-gemini35-flash", Kind: "openai", OpenAIBaseURL: "u", APIKey: "k"})
+	id, err := s.LogRequest(RequestLog{
+		Ts:               time.Now(),
+		ClientModel:      "fast",
+		ResolvedModel:    "Google: Gemini 3.5 Flash",
+		ProviderName:     "charaboard-gemini35-flash",
+		PromptTokens:     1000,
+		CompletionTokens: 50,
+		TotalTokens:      1050,
+		CachedTokens:     800,
+		Status:           "ok",
+	})
+	if err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+	got, err := s.GetRequestLog(id)
+	if err != nil {
+		t.Fatalf("GetRequestLog: %v", err)
+	}
+	if got.CachedTokens != 800 {
+		t.Errorf("GetRequestLog: cached_tokens want 800, got %d", got.CachedTokens)
+	}
+}
+
+// TestModelCost_CachedRate_RoundTrip: the v11 usd_per_cached_1k column must
+// round-trip through SetModelCost / GetModelCost as a *float64.
+func TestModelCost_CachedRate_RoundTrip(t *testing.T) {
+	s := openTest(t)
+	cachedRate := 0.0001
+	in := ModelCost{
+		Provider:       "charaboard-gpt52",
+		Model:          "OpenAI: GPT-5.2 Chat",
+		USDPerInput1k:  0.00175,
+		USDPerOutput1k: 0.014,
+		USDPerCached1k: &cachedRate,
+		EffectiveFrom:  time.Now(),
+	}
+	if err := s.SetModelCost(in); err != nil {
+		t.Fatalf("SetModelCost: %v", err)
+	}
+	got, err := s.GetModelCost(in.Provider, in.Model, time.Now())
+	if err != nil {
+		t.Fatalf("GetModelCost: %v", err)
+	}
+	if got.USDPerCached1k == nil || *got.USDPerCached1k != cachedRate {
+		t.Errorf("usd_per_cached_1k round-trip: want %v, got %v", cachedRate, got.USDPerCached1k)
+	}
+}
+
 func TestLog_TailOrderByTsDesc(t *testing.T) {
 	s := openTest(t)
 	_ = s.AddProvider(Provider{Name: "p", Kind: "deepseek", OpenAIBaseURL: "u", APIKey: "k"})

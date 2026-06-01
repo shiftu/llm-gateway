@@ -261,6 +261,7 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		PromptTokens:     u.InputTokens,
 		CompletionTokens: u.OutputTokens,
 		TotalTokens:      u.InputTokens + u.OutputTokens + u.ReasoningTokens,
+		CachedTokens:     u.CachedTokens,
 		RouteTrace:       marshalCognitiveTrace(route.Cognitive),
 	}
 	if hasKey {

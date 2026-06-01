@@ -445,6 +445,7 @@ func listRequestLogsHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			PromptTokens     int    `json:"prompt_tokens"`
 			CompletionTokens int    `json:"completion_tokens"`
 			TotalTokens      int    `json:"total_tokens"`
+			CachedTokens     int    `json:"cached_tokens,omitempty"`
 			LatencyMs        int    `json:"latency_ms"`
 			Status           string `json:"status"`
 			ErrorMsg         string `json:"error_msg,omitempty"`
@@ -463,6 +464,7 @@ func listRequestLogsHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 				PromptTokens:     l.PromptTokens,
 				CompletionTokens: l.CompletionTokens,
 				TotalTokens:      l.TotalTokens,
+				CachedTokens:     l.CachedTokens,
 				LatencyMs:        l.LatencyMs,
 				Status:           l.Status,
 				ErrorMsg:         l.ErrorMsg,

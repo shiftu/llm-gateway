@@ -24,13 +24,15 @@ import (
 )
 
 const (
-	// schemaVersion = 10: v10 adds master_keys table (v0.3 T17).
+	// schemaVersion = 11: v11 adds model_costs.usd_per_cached_1k and
+	// request_logs.cached_tokens for prompt-cache pricing (charaboard).
+	// v10 added master_keys table (v0.3 T17).
 	// v9 added budgets table (v0.3 T16).
 	// v8 added admin_audit hash chain columns (v0.3 T22).
 	// v7 added provider_capabilities (v0.3 T11).
 	// v6 added fallback_policies (v0.3 T4).
 	// v5 added request_logs.route_trace (v0.3 T5).
-	schemaVersion           = 10
+	schemaVersion           = 11
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -336,6 +338,15 @@ CREATE TABLE IF NOT EXISTS master_keys (
   created_at   INTEGER NOT NULL,
   retired_at   INTEGER
 );
+`,
+
+	// v10 → v11: prompt-cache columns. cached_tokens is the portion of
+	// prompt_tokens that hit the upstream prompt cache; usd_per_cached_1k
+	// is the discounted unit price for those tokens. Both nullable — older
+	// providers without cache pricing fall back to the standard input rate.
+	`
+ALTER TABLE model_costs  ADD COLUMN usd_per_cached_1k REAL;
+ALTER TABLE request_logs ADD COLUMN cached_tokens     INTEGER;
 `,
 }
 
@@ -664,6 +675,10 @@ type RequestLog struct {
 	TeamID   string
 	// v0.3 T5: JSON-encoded router.CognitiveTrace; empty for static routes
 	RouteTrace string
+	// v11: portion of PromptTokens that hit the upstream prompt cache.
+	// 0 when the upstream did not report cached_tokens or the model lacks
+	// caching support.
+	CachedTokens int
 }
 
 // ListRequestLogsFilter controls which rows ListRequestLogs returns.
@@ -681,12 +696,13 @@ func (s *Store) LogRequest(r RequestLog) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO request_logs
 		(ts, client_model, resolved_model, provider_name,
 		 prompt_tokens, completion_tokens, total_tokens, latency_ms,
-		 status, error_msg, prompt_excerpt, api_key_id, team_id, route_trace)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 status, error_msg, prompt_excerpt, api_key_id, team_id, route_trace, cached_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Ts.UnixMilli(), r.ClientModel, r.ResolvedModel, r.ProviderName,
 		r.PromptTokens, r.CompletionTokens, r.TotalTokens, r.LatencyMs,
 		r.Status, nullable(r.ErrorMsg), nullable(r.PromptExcerpt),
-		nullable(r.APIKeyID), nullable(r.TeamID), nullable(r.RouteTrace))
+		nullable(r.APIKeyID), nullable(r.TeamID), nullable(r.RouteTrace),
+		r.CachedTokens)
 	if err != nil {
 		return 0, err
 	}
@@ -719,17 +735,19 @@ func (s *Store) GetRequestLog(id int64) (RequestLog, error) {
 		status, error_msg, prompt_excerpt,
 		COALESCE(api_key_id, '') AS api_key_id,
 		COALESCE(team_id, '') AS team_id,
-		COALESCE(route_trace, '') AS route_trace
+		COALESCE(route_trace, '') AS route_trace,
+		cached_tokens
 		FROM request_logs WHERE id = ?`, id)
 	var rl RequestLog
 	var ts int64
 	var errMsg, excerpt sql.NullString
-	var promptT, completionT, totalT, latency sql.NullInt64
+	var promptT, completionT, totalT, latency, cachedT sql.NullInt64
 	err := row.Scan(
 		&rl.ID, &ts, &rl.ClientModel, &rl.ResolvedModel, &rl.ProviderName,
 		&promptT, &completionT, &totalT, &latency,
 		&rl.Status, &errMsg, &excerpt,
 		&rl.APIKeyID, &rl.TeamID, &rl.RouteTrace,
+		&cachedT,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RequestLog{}, ErrNotFound
@@ -744,6 +762,7 @@ func (s *Store) GetRequestLog(id int64) (RequestLog, error) {
 	rl.LatencyMs = int(latency.Int64)
 	rl.ErrorMsg = errMsg.String
 	rl.PromptExcerpt = excerpt.String
+	rl.CachedTokens = int(cachedT.Int64)
 	return rl, nil
 }
 
@@ -762,7 +781,8 @@ func (s *Store) ListRequestLogs(f ListRequestLogsFilter) ([]RequestLog, error) {
 		prompt_tokens, completion_tokens, total_tokens, latency_ms,
 		status, error_msg, prompt_excerpt,
 		COALESCE(api_key_id, '') AS api_key_id,
-		COALESCE(team_id, '') AS team_id
+		COALESCE(team_id, '') AS team_id,
+		cached_tokens
 		FROM request_logs`
 
 	var args []any
@@ -791,12 +811,13 @@ func (s *Store) ListRequestLogs(f ListRequestLogsFilter) ([]RequestLog, error) {
 		var rl RequestLog
 		var ts int64
 		var errMsg, excerpt sql.NullString
-		var promptT, completionT, totalT, latency sql.NullInt64
+		var promptT, completionT, totalT, latency, cachedT sql.NullInt64
 		err := rows.Scan(
 			&rl.ID, &ts, &rl.ClientModel, &rl.ResolvedModel, &rl.ProviderName,
 			&promptT, &completionT, &totalT, &latency,
 			&rl.Status, &errMsg, &excerpt,
 			&rl.APIKeyID, &rl.TeamID,
+			&cachedT,
 		)
 		if err != nil {
 			return nil, err
@@ -808,6 +829,7 @@ func (s *Store) ListRequestLogs(f ListRequestLogsFilter) ([]RequestLog, error) {
 		rl.LatencyMs = int(latency.Int64)
 		rl.ErrorMsg = errMsg.String
 		rl.PromptExcerpt = excerpt.String
+		rl.CachedTokens = int(cachedT.Int64)
 		out = append(out, rl)
 	}
 	return out, rows.Err()
@@ -922,6 +944,7 @@ type ModelCostEntry struct {
 	USDPerInput1K     float64
 	USDPerOutput1K    float64
 	USDPerReasoning1K *float64
+	USDPerCached1K    *float64
 }
 
 // ListLatestModelCosts returns the most-recent model_costs row for every
@@ -931,7 +954,7 @@ type ModelCostEntry struct {
 func (s *Store) ListLatestModelCosts() (map[string]ModelCostEntry, error) {
 	rows, err := s.db.Query(`
 		SELECT mc.provider, mc.model,
-		       mc.usd_per_input_1k, mc.usd_per_output_1k, mc.usd_per_reasoning_1k
+		       mc.usd_per_input_1k, mc.usd_per_output_1k, mc.usd_per_reasoning_1k, mc.usd_per_cached_1k
 		FROM model_costs mc
 		INNER JOIN (
 			SELECT provider, model, MAX(effective_from) AS max_ef
@@ -948,14 +971,18 @@ func (s *Store) ListLatestModelCosts() (map[string]ModelCostEntry, error) {
 	for rows.Next() {
 		var provider, model string
 		var e ModelCostEntry
-		var reasoning sql.NullFloat64
+		var reasoning, cached sql.NullFloat64
 		if err := rows.Scan(&provider, &model,
-			&e.USDPerInput1K, &e.USDPerOutput1K, &reasoning); err != nil {
+			&e.USDPerInput1K, &e.USDPerOutput1K, &reasoning, &cached); err != nil {
 			return nil, err
 		}
 		if reasoning.Valid {
 			v := reasoning.Float64
 			e.USDPerReasoning1K = &v
+		}
+		if cached.Valid {
+			v := cached.Float64
+			e.USDPerCached1K = &v
 		}
 		out[provider+":"+model] = e
 	}
