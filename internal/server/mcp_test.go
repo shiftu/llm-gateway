@@ -108,6 +108,7 @@ func TestMCP_LegacyToken_ToolsListIncludesSetModelCost(t *testing.T) {
 		"list_model_costs": false,
 		"add_provider":    false,
 		"add_team":        false,
+		"remove_team":     false,
 	}
 	for _, t0 := range tools {
 		m, _ := t0.(map[string]any)

@@ -153,7 +153,7 @@ func TestCheckTool_Auditor_WriteTools_Denied(t *testing.T) {
 		"add_provider", "remove_provider", "set_default_provider",
 		"set_model_alias", "delete_model_alias",
 		"set_model_cost",
-		"add_team", "issue_api_key", "revoke_api_key",
+		"add_team", "remove_team", "issue_api_key", "revoke_api_key",
 		"set_quota",
 		"set_team_model_alias", "delete_team_model_alias",
 		"prune_audit_log",

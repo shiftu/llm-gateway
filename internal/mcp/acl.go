@@ -38,6 +38,7 @@ var registry = map[string]string{
 
 	// tenancy tools
 	"add_team":          "mcp_super",
+	"remove_team":       "mcp_super",
 	"list_teams":        "mcp_auditor",
 	"issue_api_key":     "mcp_super",
 	"revoke_api_key":    "mcp_super",

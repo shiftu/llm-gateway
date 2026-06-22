@@ -24,6 +24,13 @@ func RegisterTenancyTools(s *mcpserver.MCPServer, st *store.Store) {
 		addTeamHandler(st),
 	)
 	s.AddTool(
+		mcplib.NewTool("remove_team",
+			mcplib.WithDescription("Delete a team by slug. Fails if the team still has any API keys (revoke them first with revoke_api_key) — this protects the request-log audit chain."),
+			mcplib.WithString("slug", mcplib.Required(), mcplib.Description("Slug of the team to delete")),
+		),
+		removeTeamHandler(st),
+	)
+	s.AddTool(
 		mcplib.NewTool("list_teams",
 			mcplib.WithDescription("List all registered teams ordered by slug."),
 		),
@@ -172,6 +179,36 @@ func addTeamHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 		out, _ := json.Marshal(map[string]any{
 			"ok": true, "id": team.ID, "slug": team.Slug, "name": team.Name,
 		})
+		return mcplib.NewToolResultText(string(out)), nil
+	}
+}
+
+func removeTeamHandler(st *store.Store) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if err := checkTool(ctx, "remove_team"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		slug := req.GetString("slug", "")
+		if slug == "" {
+			return mcplib.NewToolResultError("required: slug"), nil
+		}
+		team, err := st.GetTeamBySlug(slug)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return mcplib.NewToolResultError("team not found: " + slug), nil
+			}
+			return mcplib.NewToolResultError("remove_team: lookup team: " + err.Error()), nil
+		}
+		if err := st.RemoveTeam(team.ID); err != nil {
+			// The only non-NotFound failure path is the api_keys FK
+			// (ON DELETE RESTRICT): the team still has live keys.
+			return mcplib.NewToolResultError(fmt.Sprintf(
+				"remove_team failed for %q: %v. Revoke its API keys first with revoke_api_key, then retry.",
+				slug, err,
+			)), nil
+		}
+		audit(st, "remove_team", "team", team.ID, map[string]string{"slug": team.Slug})
+		out, _ := json.Marshal(map[string]any{"ok": true, "id": team.ID, "slug": team.Slug})
 		return mcplib.NewToolResultText(string(out)), nil
 	}
 }

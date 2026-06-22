@@ -75,6 +75,59 @@ func TestAddTeam_InsufficientScope_Denied(t *testing.T) {
 	}
 }
 
+// --- remove_team ---
+
+func TestRemoveTeam_Success(t *testing.T) {
+	st := openTestStore(t)
+	_, _ = st.AddTeam("acme", "Acme")
+	h := removeTeamHandler(st)
+	res, err := h(ctxWithScope("mcp_super"), callTool(map[string]any{"slug": "acme"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handler error: %v", res.Content)
+	}
+	if _, err := st.GetTeamBySlug("acme"); err == nil {
+		t.Error("team should not be found after remove_team")
+	}
+}
+
+func TestRemoveTeam_NotFound_ReturnsToolError(t *testing.T) {
+	st := openTestStore(t)
+	h := removeTeamHandler(st)
+	res, _ := h(ctxWithScope("mcp_super"), callTool(map[string]any{"slug": "ghost"}))
+	if !res.IsError {
+		t.Error("expected tool error for unknown team")
+	}
+}
+
+func TestRemoveTeam_BlockedByAPIKey_ReturnsToolError(t *testing.T) {
+	// FK ON DELETE RESTRICT: a team with live keys cannot be deleted. The
+	// handler must surface an actionable error pointing at revoke_api_key.
+	st := openTestStore(t)
+	team, _ := st.AddTeam("acme", "Acme")
+	_, _, _ = st.IssueAPIKey(team.ID, "inbound", "ci")
+	h := removeTeamHandler(st)
+	res, _ := h(ctxWithScope("mcp_super"), callTool(map[string]any{"slug": "acme"}))
+	if !res.IsError {
+		t.Error("expected tool error while api_keys still reference the team")
+	}
+	if !strings.Contains(textContent(t, res), "revoke_api_key") {
+		t.Errorf("error should mention revoke_api_key, got: %s", textContent(t, res))
+	}
+}
+
+func TestRemoveTeam_InsufficientScope_Denied(t *testing.T) {
+	st := openTestStore(t)
+	_, _ = st.AddTeam("acme", "Acme")
+	h := removeTeamHandler(st)
+	res, _ := h(ctxWithScope("mcp_admin"), callTool(map[string]any{"slug": "acme"}))
+	if !res.IsError {
+		t.Error("expected permission denied for mcp_admin scope (remove_team is mcp_super)")
+	}
+}
+
 // --- list_teams ---
 
 func TestListTeams_ReturnsAll(t *testing.T) {
