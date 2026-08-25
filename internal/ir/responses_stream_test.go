@@ -147,6 +147,163 @@ func TestResponsesStream_ToolCall_FiveEvents(t *testing.T) {
 	}
 }
 
+func TestResponsesStream_MultipleToolCalls(t *testing.T) {
+	// 测试多个并行工具调用：两个 tool_call 同时出现，各自有独立的 output_index
+	s := NewResponsesStreamState("resp_multi", "test-model")
+
+	var all [][]byte
+	all = append(all, s.Start()...)
+	// 第一个 chunk: 两个 tool_call 同时出现（index 0 和 1）
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[
+		{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":""}},
+		{"index":1,"id":"call_2","type":"function","function":{"name":"read","arguments":""}}
+	]}}]}`))...)
+	// 第二个 chunk: 两个 tool_call 的 arguments delta
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[
+		{"index":0,"function":{"arguments":"{\"cmd\":"}},
+		{"index":1,"function":{"arguments":"{\"file\":"}}
+	]}}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[
+		{"index":0,"function":{"arguments":"\"echo hi\"}"}},
+		{"index":1,"function":{"arguments":"\"test.txt\"}"}}
+	]}}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))...)
+
+	events := parseEvents(t, all)
+	got := eventTypes(events)
+
+	// 期望的事件序列：
+	// 1. response.created
+	// 2. response.in_progress
+	// 3. response.output_item.added (tool call 0)
+	// 4. response.output_item.added (tool call 1)
+	// 5-6. response.function_call_arguments.delta (tool call 0, 两次)
+	// 7-8. response.function_call_arguments.delta (tool call 1, 两次)
+	// 9. response.function_call_arguments.done (tool call 0)
+	// 10. response.output_item.done (tool call 0)
+	// 11. response.function_call_arguments.done (tool call 1)
+	// 12. response.output_item.done (tool call 1)
+	// 13. response.completed
+
+	// 验证有两个 output_item.added
+	addedCount := 0
+	for _, e := range events {
+		if e["type"] == "response.output_item.added" {
+			addedCount++
+		}
+	}
+	if addedCount != 2 {
+		t.Errorf("expected 2 output_item.added events, got %d", addedCount)
+	}
+
+	// 验证有两个 output_item.done
+	doneCount := 0
+	for _, e := range events {
+		if e["type"] == "response.output_item.done" {
+			doneCount++
+		}
+	}
+	if doneCount != 2 {
+		t.Errorf("expected 2 output_item.done events, got %d", doneCount)
+	}
+
+	// 验证 output_index 正确：第一个 tool call 是 0，第二个是 1
+	for _, e := range events {
+		if e["type"] == "response.output_item.added" {
+			item := e["item"].(map[string]any)
+			callID := item["call_id"].(string)
+			outputIndex := int(e["output_index"].(float64))
+			if callID == "call_1" && outputIndex != 0 {
+				t.Errorf("call_1 should have output_index 0, got %d", outputIndex)
+			}
+			if callID == "call_2" && outputIndex != 1 {
+				t.Errorf("call_2 should have output_index 1, got %d", outputIndex)
+			}
+		}
+	}
+
+	// 验证 response.completed 的 output 数组包含两个 item
+	completed := events[len(events)-1]
+	if completed["type"] != "response.completed" {
+		t.Fatalf("last event should be response.completed, got %v", completed["type"])
+	}
+	resp := completed["response"].(map[string]any)
+	output := resp["output"].([]any)
+	if len(output) != 2 {
+		t.Errorf("response.completed.output should have 2 items, got %d", len(output))
+	}
+
+	// 验证事件类型序列（跳过前两个 created/in_progress）
+	wantTypes := []string{
+		"response.output_item.added",
+		"response.output_item.added",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.output_item.done",
+		"response.function_call_arguments.done",
+		"response.output_item.done",
+		"response.completed",
+	}
+	gotTypes := got[2:] // 跳过 created 和 in_progress
+	if len(gotTypes) != len(wantTypes) {
+		t.Fatalf("event type count mismatch: got %d, want %d\ngot: %v", len(gotTypes), len(wantTypes), gotTypes)
+	}
+	for i := range wantTypes {
+		if gotTypes[i] != wantTypes[i] {
+			t.Errorf("event[%d] = %q, want %q", i+2, gotTypes[i], wantTypes[i])
+		}
+	}
+}
+
+func TestResponsesStream_MessageThenToolCalls(t *testing.T) {
+	// 测试文本消息后跟工具调用：文本占用 output_index 0，工具调用从 1 开始
+	s := NewResponsesStreamState("resp_mixed", "test-model")
+
+	var all [][]byte
+	all = append(all, s.Start()...)
+	// 先发送文本
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"content":"Let me "}}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"content":"help you."}}]}`))...)
+	// 然后发送工具调用
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":""}}]}}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"echo hi\"}"}}]}}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`))...)
+
+	events := parseEvents(t, all)
+
+	// 验证 message 的 output_index 是 0
+	for _, e := range events {
+		if e["type"] == "response.output_item.added" {
+			item := e["item"].(map[string]any)
+			if item["type"] == "message" {
+				outputIndex := int(e["output_index"].(float64))
+				if outputIndex != 0 {
+					t.Errorf("message should have output_index 0, got %d", outputIndex)
+				}
+			}
+			if item["type"] == "function_call" {
+				outputIndex := int(e["output_index"].(float64))
+				if outputIndex != 1 {
+					t.Errorf("function_call should have output_index 1 (after message), got %d", outputIndex)
+				}
+			}
+		}
+	}
+
+	// 验证 response.completed 的 output 数组包含两个 item
+	completed := events[len(events)-1]
+	resp := completed["response"].(map[string]any)
+	output := resp["output"].([]any)
+	if len(output) != 2 {
+		t.Errorf("response.completed.output should have 2 items (message + function_call), got %d", len(output))
+	}
+}
+
 func TestResponsesStream_Finish_FallsBackWhenUsageNeverArrives(t *testing.T) {
 	s := NewResponsesStreamState("resp_3", "test-model")
 	var all [][]byte
