@@ -47,8 +47,9 @@ type ResponsesStreamState struct {
 	failErr    string
 	finalItems []map[string]any
 
-	usageIn  int
-	usageOut int
+	usageIn       int
+	usageOut      int
+	usageReasoning int
 }
 
 // NewResponsesStreamState 创建一个新的翻译状态机。respID 和 model 会出现在
@@ -98,6 +99,12 @@ type chatStreamChunk struct {
 	Usage *struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
+		// Reasoning tokens: some providers put it directly here
+		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		// Or in completion_tokens_details (OpenAI format)
+		Details *struct {
+			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		} `json:"completion_tokens_details,omitempty"`
 	} `json:"usage"`
 }
 
@@ -138,6 +145,12 @@ func (s *ResponsesStreamState) Feed(data []byte) [][]byte {
 	if chunk.Usage != nil {
 		s.usageIn = chunk.Usage.PromptTokens
 		s.usageOut = chunk.Usage.CompletionTokens
+		// Extract reasoning tokens: direct field or from completion_tokens_details
+		if chunk.Usage.ReasoningTokens > 0 {
+			s.usageReasoning = chunk.Usage.ReasoningTokens
+		} else if chunk.Usage.Details != nil && chunk.Usage.Details.ReasoningTokens > 0 {
+			s.usageReasoning = chunk.Usage.Details.ReasoningTokens
+		}
 		if s.finished {
 			events = append(events, s.complete())
 		}
@@ -328,7 +341,7 @@ func (s *ResponsesStreamState) complete() []byte {
 			},
 			"usage": map[string]any{
 				"input_tokens": s.usageIn, "output_tokens": s.usageOut,
-				"total_tokens": s.usageIn + s.usageOut,
+				"total_tokens": s.usageIn + s.usageOut + s.usageReasoning,
 			},
 		}
 		return s.emit("response.failed", map[string]any{"response": resp})
@@ -339,7 +352,7 @@ func (s *ResponsesStreamState) complete() []byte {
 		"status": "completed", "output": output,
 		"usage": map[string]any{
 			"input_tokens": s.usageIn, "output_tokens": s.usageOut,
-			"total_tokens": s.usageIn + s.usageOut,
+			"total_tokens": s.usageIn + s.usageOut + s.usageReasoning,
 		},
 	}
 	return s.emit("response.completed", map[string]any{"response": resp})
@@ -347,8 +360,8 @@ func (s *ResponsesStreamState) complete() []byte {
 
 // Usage 返回目前累计到的 token 计数，供调用方计费用 —— 上游是纯 Chat
 // 报文，这里直接暴露翻好的 Responses 计数，调用方不用再解一遍。
-func (s *ResponsesStreamState) Usage() (input, output int) {
-	return s.usageIn, s.usageOut
+func (s *ResponsesStreamState) Usage() (input, output, reasoning int) {
+	return s.usageIn, s.usageOut, s.usageReasoning
 }
 
 func (s *ResponsesStreamState) emit(eventType string, payload map[string]any) []byte {

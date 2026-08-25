@@ -377,3 +377,58 @@ func TestResponsesStream_Failed(t *testing.T) {
 		t.Errorf("error.message = %v, want 'upstream connection reset'", errObj["message"])
 	}
 }
+
+func TestResponsesStream_ReasoningTokens(t *testing.T) {
+	// Test that reasoning_tokens are captured and included in total_tokens
+	s := NewResponsesStreamState("resp_reason", "test-model")
+	var all [][]byte
+	all = append(all, s.Start()...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"content":"thinking..."}}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`))...)
+	// Usage with reasoning tokens in completion_tokens_details (OpenAI format)
+	all = append(all, s.Feed([]byte(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"completion_tokens_details":{"reasoning_tokens":5}}}`))...)
+
+	events := parseEvents(t, all)
+	completed := events[len(events)-1]
+	if completed["type"] != "response.completed" {
+		t.Fatalf("last event = %v, want response.completed", completed["type"])
+	}
+	resp := completed["response"].(map[string]any)
+	usage := resp["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(10) {
+		t.Errorf("input_tokens = %v, want 10", usage["input_tokens"])
+	}
+	if usage["output_tokens"] != float64(20) {
+		t.Errorf("output_tokens = %v, want 20", usage["output_tokens"])
+	}
+	// total_tokens should include reasoning: 10 + 20 + 5 = 35
+	if usage["total_tokens"] != float64(35) {
+		t.Errorf("total_tokens = %v, want 35 (10 + 20 + 5 reasoning)", usage["total_tokens"])
+	}
+
+	// Verify Usage() method returns reasoning tokens
+	in, out, reasoning := s.Usage()
+	if in != 10 || out != 20 || reasoning != 5 {
+		t.Errorf("Usage() = (%d, %d, %d), want (10, 20, 5)", in, out, reasoning)
+	}
+}
+
+func TestResponsesStream_ReasoningTokens_DirectField(t *testing.T) {
+	// Test reasoning tokens in direct field (DeepSeek format)
+	s := NewResponsesStreamState("resp_reason2", "test-model")
+	var all [][]byte
+	all = append(all, s.Start()...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"content":"hi"}}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`))...)
+	// Usage with reasoning_tokens as direct field (DeepSeek format)
+	all = append(all, s.Feed([]byte(`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":10,"reasoning_tokens":3}}`))...)
+
+	events := parseEvents(t, all)
+	completed := events[len(events)-1]
+	resp := completed["response"].(map[string]any)
+	usage := resp["usage"].(map[string]any)
+	// total_tokens should include reasoning: 5 + 10 + 3 = 18
+	if usage["total_tokens"] != float64(18) {
+		t.Errorf("total_tokens = %v, want 18 (5 + 10 + 3 reasoning)", usage["total_tokens"])
+	}
+}
