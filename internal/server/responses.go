@@ -164,6 +164,10 @@ func (s *Server) dispatchResponses(w http.ResponseWriter, r *http.Request) {
 		applySSEChunkUsage(&upstreamUsage, []byte(data), protocolOpenAI)
 		writeFrames(state.Feed([]byte(data)))
 	}
+	// Check for scanner errors (upstream connection dropped, timeout, etc.)
+	if err := sc.Err(); err != nil {
+		state.MarkFailed(fmt.Sprintf("upstream stream error: %v", err))
+	}
 	writeFrames(state.Finish())
 
 	rl := store.RequestLog{
@@ -177,6 +181,10 @@ func (s *Server) dispatchResponses(w http.ResponseWriter, r *http.Request) {
 		TotalTokens:      upstreamUsage.InputTokens + upstreamUsage.OutputTokens + upstreamUsage.ReasoningTokens,
 		CachedTokens:     upstreamUsage.CachedTokens,
 		RouteTrace:       marshalCognitiveTrace(route.Cognitive),
+	}
+	if state.Failed() {
+		rl.Status = "upstream_error"
+		rl.ErrorMsg = state.FailError()
 	}
 	if hasKey {
 		rl.APIKeyID = ak.ID

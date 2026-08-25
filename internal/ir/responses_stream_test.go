@@ -353,3 +353,27 @@ func TestResponsesStream_EmptyResponse_StillCompletes(t *testing.T) {
 		}
 	}
 }
+
+func TestResponsesStream_Failed(t *testing.T) {
+	s := NewResponsesStreamState("resp_fail", "test-model")
+	s.Start()
+	s.Feed([]byte(`{"choices":[{"delta":{"content":"partial"}}]}`))
+	s.MarkFailed("upstream connection reset")
+	events := parseEvents(t, s.Finish())
+
+	last := events[len(events)-1]
+	if last["type"] != "response.failed" {
+		t.Fatalf("last event = %v, want response.failed", last["type"])
+	}
+	resp := last["response"].(map[string]any)
+	if resp["status"] != "failed" {
+		t.Errorf("status = %v, want failed", resp["status"])
+	}
+	errObj := resp["error"].(map[string]any)
+	if errObj["code"] != "upstream_error" {
+		t.Errorf("error.code = %v, want upstream_error", errObj["code"])
+	}
+	if errObj["message"] != "upstream connection reset" {
+		t.Errorf("error.message = %v, want 'upstream connection reset'", errObj["message"])
+	}
+}

@@ -43,6 +43,8 @@ type ResponsesStreamState struct {
 
 	finished   bool // *.done 事件已发，只差 response.completed
 	responded  bool // response.completed 已发 —— 之后的 Feed 全部丢弃
+	failed     bool // 上游流错误，应发送 response.failed 而非 response.completed
+	failErr    string
 	finalItems []map[string]any
 
 	usageIn  int
@@ -57,6 +59,23 @@ func NewResponsesStreamState(respID, model string) *ResponsesStreamState {
 		model:     model,
 		toolCalls: make(map[int]*toolCallState),
 	}
+}
+
+// MarkFailed marks the stream as failed due to an upstream error.
+// Subsequent calls to Finish() will emit response.failed instead of response.completed.
+func (s *ResponsesStreamState) MarkFailed(err string) {
+	s.failed = true
+	s.failErr = err
+}
+
+// Failed returns true if the stream was marked as failed.
+func (s *ResponsesStreamState) Failed() bool {
+	return s.failed
+}
+
+// FailError returns the error message if the stream failed.
+func (s *ResponsesStreamState) FailError() string {
+	return s.failErr
 }
 
 type chatStreamToolCallDelta struct {
@@ -297,6 +316,24 @@ func (s *ResponsesStreamState) complete() []byte {
 			output = append(output, item)
 		}
 	}
+
+	// If the stream failed, emit response.failed instead of response.completed
+	if s.failed {
+		resp := map[string]any{
+			"id": s.respID, "object": "response", "model": s.model,
+			"status": "failed", "output": output,
+			"error": map[string]any{
+				"code":    "upstream_error",
+				"message": s.failErr,
+			},
+			"usage": map[string]any{
+				"input_tokens": s.usageIn, "output_tokens": s.usageOut,
+				"total_tokens": s.usageIn + s.usageOut,
+			},
+		}
+		return s.emit("response.failed", map[string]any{"response": resp})
+	}
+
 	resp := map[string]any{
 		"id": s.respID, "object": "response", "model": s.model,
 		"status": "completed", "output": output,
