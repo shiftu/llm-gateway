@@ -18,9 +18,11 @@ import (
 
 // Responses 的 input 条目类型。
 const (
-	RespItemMessage            = "message"
-	RespItemFunctionCall       = "function_call"
-	RespItemFunctionCallOutput = "function_call_output"
+	RespItemMessage               = "message"
+	RespItemFunctionCall          = "function_call"
+	RespItemFunctionCallOutput    = "function_call_output"
+	RespItemCustomToolCall        = "custom_tool_call"
+	RespItemCustomToolCallOutput  = "custom_tool_call_output"
 )
 
 // ErrEmptyInput：input 为空（或全被过滤）时必须报错，不能往上游发
@@ -48,12 +50,65 @@ type ResponsesItem struct {
 	Role string `json:"role,omitempty"`
 	// message
 	Content []ResponsesPart `json:"content,omitempty"`
-	// function_call
+	// function_call / custom_tool_call
 	CallID    string `json:"call_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
-	// function_call_output
+	Input     string `json:"input,omitempty"` // custom_tool_call uses "input" instead of "arguments"
+	// function_call_output: output is a string
 	Output string `json:"output,omitempty"`
+	// custom_tool_call_output: output is an array of content parts
+	// We use json.RawMessage to handle both string and array forms
+	OutputRaw json.RawMessage `json:"output_raw,omitempty"`
+}
+
+// UnmarshalJSON handles the polymorphic output field:
+// - function_call_output: output is a string
+// - custom_tool_call_output: output is an array of content parts
+func (it *ResponsesItem) UnmarshalJSON(data []byte) error {
+	// Use an alias to avoid infinite recursion
+	type Alias ResponsesItem
+	aux := &struct {
+		Output interface{} `json:"output"`
+		*Alias
+	}{
+		Alias: (*Alias)(it),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	// Handle the polymorphic output field
+	switch v := aux.Output.(type) {
+	case string:
+		it.Output = v
+	case []interface{}:
+		// It's an array of content parts - marshal back to JSON for later parsing
+		raw, _ := json.Marshal(v)
+		it.OutputRaw = raw
+	}
+	return nil
+}
+
+// GetOutputText returns the output as a single string.
+// For function_call_output, returns Output directly.
+// For custom_tool_call_output, concatenates all text parts from OutputRaw.
+func (it *ResponsesItem) GetOutputText() string {
+	if it.Output != "" {
+		return it.Output
+	}
+	if len(it.OutputRaw) > 0 {
+		var parts []ResponsesPart
+		if err := json.Unmarshal(it.OutputRaw, &parts); err == nil {
+			var text string
+			for _, p := range parts {
+				if p.Type == "input_text" || p.Type == "output_text" || p.Type == "text" {
+					text += p.Text
+				}
+			}
+			return text
+		}
+	}
+	return ""
 }
 
 type ResponsesPart struct {
@@ -190,6 +245,39 @@ func chatMessageFromItem(it ResponsesItem) (map[string]any, bool) {
 			"role":         "tool",
 			"tool_call_id": it.CallID,
 			"content":      it.Output,
+		}, true
+
+	case RespItemCustomToolCall:
+		// custom_tool_call 是 codex 0.147+ 用来传递内置工具（如 exec/shell）调用的。
+		// 结构上与 function_call 类似，但用 "input" 而不是 "arguments"。
+		// 翻成 Chat 的 assistant + tool_calls，与 function_call 走同一条路。
+		if it.CallID == "" || it.Name == "" {
+			return nil, false
+		}
+		args := it.Input
+		if args == "" {
+			args = "{}"
+		}
+		return map[string]any{
+			"role":    "assistant",
+			"content": nil,
+			"tool_calls": []map[string]any{{
+				"id":       it.CallID,
+				"type":     "function",
+				"function": map[string]any{"name": it.Name, "arguments": args},
+			}},
+		}, true
+
+	case RespItemCustomToolCallOutput:
+		// custom_tool_call_output 的 output 是 content parts 数组，
+		// GetOutputText() 会把所有文本 part 拼成一个字符串。
+		if it.CallID == "" {
+			return nil, false
+		}
+		return map[string]any{
+			"role":         "tool",
+			"tool_call_id": it.CallID,
+			"content":      it.GetOutputText(),
 		}, true
 	}
 	return nil, false

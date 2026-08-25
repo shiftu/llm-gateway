@@ -202,3 +202,67 @@ func TestServer_Responses_NoRoute_Returns404(t *testing.T) {
 		t.Fatalf("status: want 404, got %d", resp.StatusCode)
 	}
 }
+
+func TestServer_Responses_CustomToolCallTurn(t *testing.T) {
+	// codex 0.147+ 用 custom_tool_call 传递内置工具调用。
+	// 验证：入站 custom_tool_call → 翻成 Chat tool_calls → 上游返回 function_call
+	// → 翻成 custom_tool_call 风格的 response（实际走 function_call 事件序列，
+	// 因为上游不区分 custom 和 function）。
+	upstream := &flushingSSEHandler{
+		chunks: []string{
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_ctc1\",\"type\":\"function\",\"function\":{\"name\":\"exec\",\"arguments\":\"\"}}]}}]}\n\n",
+			"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\\\"echo hi\\\"}\"}}]}}]}\n\n",
+			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1}}\n\n",
+			"data: [DONE]\n\n",
+		},
+	}
+	upSrv := httptest.NewServer(upstream)
+	defer upSrv.Close()
+
+	s := newStoreWithDefaultProvider(t, "deepseek", storeOpts{openaiURL: upSrv.URL + "/v1"})
+	srv := NewServer("gw-token", s)
+	gw := httptest.NewServer(srv.Handler())
+	defer gw.Close()
+
+	// 入站请求包含 custom_tool_call 历史（模拟多轮对话的第二轮）
+	clientBody := `{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"run echo"}]},
+			{"type":"custom_tool_call","call_id":"call_prev","name":"exec","input":"{}"},
+			{"type":"custom_tool_call_output","call_id":"call_prev","output":[
+				{"type":"input_text","text":"previous output"}
+			]}
+		],
+		"tools": [{"type":"function","name":"exec","description":"run commands","parameters":{"type":"object"}}],
+		"stream": true
+	}`
+	req, _ := http.NewRequest(http.MethodPost, gw.URL+"/v1/responses", strings.NewReader(clientBody))
+	req.Header.Set("Authorization", "Bearer gw-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	out := string(body)
+
+	// 验证响应包含工具调用事件
+	for _, want := range []string{
+		"event: response.output_item.added",
+		"event: response.function_call_arguments.delta",
+		"event: response.function_call_arguments.done",
+		"event: response.output_item.done",
+		"event: response.completed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+	// call_id 应该从上游透传
+	if !strings.Contains(out, `"call_id":"call_ctc1"`) {
+		t.Errorf("call_id from upstream not carried through:\n%s", out)
+	}
+}

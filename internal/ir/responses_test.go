@@ -193,3 +193,96 @@ func TestChatRequestFromResponses_MaxOutputTokensAndTemperature(t *testing.T) {
 		t.Errorf("temperature = %v, want 0.4", body["temperature"])
 	}
 }
+
+func TestChatRequestFromResponses_CustomToolCall(t *testing.T) {
+	// codex 0.147+ 用 custom_tool_call 传递内置工具调用（如 exec/shell）。
+	// 结构上与 function_call 类似，但用 "input" 而不是 "arguments"。
+	req := `{"model":"m","input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"run echo"}]},
+		{"type":"custom_tool_call","call_id":"call_ctc1","name":"exec","input":"{\"cmd\":\"echo hi\"}"}
+	]}`
+	out, err := ChatRequestFromResponses([]byte(req))
+	if err != nil {
+		t.Fatalf("ChatRequestFromResponses: %v", err)
+	}
+	body := decodeChatBody(t, out)
+	msgs := body["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %v, want 2 entries", msgs)
+	}
+
+	assistant := msgs[1].(map[string]any)
+	if assistant["role"] != "assistant" {
+		t.Errorf("messages[1].role = %v, want assistant", assistant["role"])
+	}
+	tcs, ok := assistant["tool_calls"].([]any)
+	if !ok || len(tcs) != 1 {
+		t.Fatalf("messages[1].tool_calls = %v, want 1 entry", assistant["tool_calls"])
+	}
+	tc := tcs[0].(map[string]any)
+	if tc["id"] != "call_ctc1" {
+		t.Errorf("tool_calls[0].id = %v, want call_ctc1", tc["id"])
+	}
+	fn := tc["function"].(map[string]any)
+	if fn["name"] != "exec" {
+		t.Errorf("function.name = %v, want exec", fn["name"])
+	}
+	if fn["arguments"] != `{"cmd":"echo hi"}` {
+		t.Errorf("function.arguments = %v, want the input field value", fn["arguments"])
+	}
+}
+
+func TestChatRequestFromResponses_CustomToolCallOutput_ArrayForm(t *testing.T) {
+	// custom_tool_call_output 的 output 是 content parts 数组，
+	// 应该把所有文本 part 拼成一个字符串。
+	req := `{"model":"m","input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+		{"type":"custom_tool_call","call_id":"call_ctc1","name":"exec","input":"{}"},
+		{"type":"custom_tool_call_output","call_id":"call_ctc1","output":[
+			{"type":"input_text","text":"line1\n"},
+			{"type":"input_text","text":"line2\n"},
+			{"type":"input_image","image_url":"data:image/png;base64,SKIP"}
+		]}
+	]}`
+	out, err := ChatRequestFromResponses([]byte(req))
+	if err != nil {
+		t.Fatalf("ChatRequestFromResponses: %v", err)
+	}
+	body := decodeChatBody(t, out)
+	msgs := body["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %v, want 3 entries", msgs)
+	}
+
+	toolMsg := msgs[2].(map[string]any)
+	if toolMsg["role"] != "tool" {
+		t.Errorf("messages[2].role = %v, want tool", toolMsg["role"])
+	}
+	if toolMsg["tool_call_id"] != "call_ctc1" {
+		t.Errorf("tool_call_id = %v, want call_ctc1", toolMsg["tool_call_id"])
+	}
+	// 图片 part 应该被跳过，只拼接文本
+	if toolMsg["content"] != "line1\nline2\n" {
+		t.Errorf("content = %q, want 'line1\\nline2\\n' (image parts skipped)", toolMsg["content"])
+	}
+}
+
+func TestChatRequestFromResponses_CustomToolCallOutput_StringForm(t *testing.T) {
+	// 防御性测试：如果 custom_tool_call_output 的 output 是字符串（与 function_call_output 相同），
+	// 也应该能正确处理。
+	req := `{"model":"m","input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"run"}]},
+		{"type":"custom_tool_call","call_id":"call_ctc1","name":"exec","input":"{}"},
+		{"type":"custom_tool_call_output","call_id":"call_ctc1","output":"plain string output"}
+	]}`
+	out, err := ChatRequestFromResponses([]byte(req))
+	if err != nil {
+		t.Fatalf("ChatRequestFromResponses: %v", err)
+	}
+	body := decodeChatBody(t, out)
+	msgs := body["messages"].([]any)
+	toolMsg := msgs[2].(map[string]any)
+	if toolMsg["content"] != "plain string output" {
+		t.Errorf("content = %q, want 'plain string output'", toolMsg["content"])
+	}
+}
