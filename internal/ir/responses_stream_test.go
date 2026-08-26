@@ -2,6 +2,7 @@ package ir
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -301,6 +302,77 @@ func TestResponsesStream_MessageThenToolCalls(t *testing.T) {
 	output := resp["output"].([]any)
 	if len(output) != 2 {
 		t.Errorf("response.completed.output should have 2 items (message + function_call), got %d", len(output))
+	}
+}
+
+func TestResponsesStream_ToolCallsThenMessage(t *testing.T) {
+	// 反向顺序：工具调用先到，文本后到 —— output_index 不应假设文本永远是 0。
+	s := NewResponsesStreamState("resp_rev", "test-model")
+
+	var all [][]byte
+	all = append(all, s.Start()...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":"{}"}}]}}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{"content":"done"}}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`))...)
+	all = append(all, s.Feed([]byte(`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))...)
+
+	events := parseEvents(t, all)
+
+	seenIndices := map[string]int{}
+	for _, e := range events {
+		if e["type"] != "response.output_item.added" {
+			continue
+		}
+		item := e["item"].(map[string]any)
+		seenIndices[item["type"].(string)] = int(e["output_index"].(float64))
+	}
+	if seenIndices["function_call"] != 0 {
+		t.Errorf("function_call (arrived first) should have output_index 0, got %d", seenIndices["function_call"])
+	}
+	if seenIndices["message"] != 1 {
+		t.Errorf("message (arrived second) should have output_index 1, got %d", seenIndices["message"])
+	}
+
+	completed := events[len(events)-1]
+	resp := completed["response"].(map[string]any)
+	output := resp["output"].([]any)
+	if len(output) != 2 {
+		t.Fatalf("response.completed.output should have 2 items, got %d", len(output))
+	}
+	if output[0].(map[string]any)["type"] != "function_call" || output[1].(map[string]any)["type"] != "message" {
+		t.Errorf("output items should preserve arrival order [function_call, message], got %v", output)
+	}
+}
+
+func TestResponsesStream_TenParallelToolCalls_UniqueItemIDs(t *testing.T) {
+	// >9 个并行工具调用时，itemID 生成不能产生非数字字符或重复值。
+	s := NewResponsesStreamState("resp_many", "test-model")
+	s.Start()
+
+	var deltas []byte
+	deltas = append(deltas, `{"choices":[{"delta":{"tool_calls":[`...)
+	for i := 0; i < 10; i++ {
+		if i > 0 {
+			deltas = append(deltas, ',')
+		}
+		deltas = append(deltas, []byte(`{"index":`+strconv.Itoa(i)+`,"id":"call_`+strconv.Itoa(i)+`","type":"function","function":{"name":"f","arguments":"{}"}}`)...)
+	}
+	deltas = append(deltas, `]}}]}`...)
+
+	events := parseEvents(t, s.Feed(deltas))
+	seen := map[string]bool{}
+	for _, e := range events {
+		if e["type"] != "response.output_item.added" {
+			continue
+		}
+		id := e["item"].(map[string]any)["id"].(string)
+		if seen[id] {
+			t.Errorf("duplicate itemID %q", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != 10 {
+		t.Errorf("expected 10 unique itemIDs, got %d", len(seen))
 	}
 }
 

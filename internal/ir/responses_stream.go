@@ -15,14 +15,16 @@ package ir
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 )
 
 // toolCallState tracks the state of a single tool call in the stream.
 type toolCallState struct {
-	itemID  string
-	callID  string
-	fnName  string
-	argsBuf bytes.Buffer
+	itemID      string
+	callID      string
+	fnName      string
+	argsBuf     bytes.Buffer
+	outputIndex int
 }
 
 // ResponsesStreamState 把一条 Chat SSE 流翻译成 Responses SSE 事件序列。
@@ -38,8 +40,16 @@ type ResponsesStreamState struct {
 	textBuf        bytes.Buffer
 
 	// Multiple tool calls, keyed by index from upstream
-	toolCalls     map[int]*toolCallState
-	toolCallOrder []int // maintain insertion order for output_index
+	toolCalls map[int]*toolCallState
+
+	// nextOutputIndex/itemOrder track output_index assignment in the order
+	// items actually started in the stream — text and tool calls can arrive
+	// in either order, so output_index can't be hardcoded per item type.
+	// itemOrder holds, in creation order, either -1 (the message item) or a
+	// tool-call's upstream index.
+	nextOutputIndex    int
+	messageOutputIndex int
+	itemOrder          []int
 
 	finished   bool // *.done 事件已发，只差 response.completed
 	responded  bool // response.completed 已发 —— 之后的 Feed 全部丢弃
@@ -47,8 +57,8 @@ type ResponsesStreamState struct {
 	failErr    string
 	finalItems []map[string]any
 
-	usageIn       int
-	usageOut      int
+	usageIn        int
+	usageOut       int
 	usageReasoning int
 }
 
@@ -192,23 +202,35 @@ func (s *ResponsesStreamState) feedTextDelta(content string) [][]byte {
 	if !s.messageStarted {
 		s.messageStarted = true
 		s.messageID = s.respID + "_out0"
+		s.messageOutputIndex = s.allocOutputIndex()
+		s.itemOrder = append(s.itemOrder, -1)
 		events = append(events, s.emit("response.output_item.added", map[string]any{
-			"output_index": 0,
+			"output_index": s.messageOutputIndex,
 			"item": map[string]any{
 				"type": "message", "id": s.messageID, "status": "in_progress",
 				"role": "assistant", "content": []any{},
 			},
 		}))
 		events = append(events, s.emit("response.content_part.added", map[string]any{
-			"item_id": s.messageID, "output_index": 0, "content_index": 0,
+			"item_id": s.messageID, "output_index": s.messageOutputIndex, "content_index": 0,
 			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
 		}))
 	}
 	s.textBuf.WriteString(content)
 	events = append(events, s.emit("response.output_text.delta", map[string]any{
-		"item_id": s.messageID, "output_index": 0, "content_index": 0, "delta": content,
+		"item_id": s.messageID, "output_index": s.messageOutputIndex, "content_index": 0, "delta": content,
 	}))
 	return events
+}
+
+// allocOutputIndex hands out the next output_index in stream order — items
+// (message or tool call) claim their slot the moment they first appear, so
+// output_index reflects arrival order regardless of whether text or a tool
+// call shows up first.
+func (s *ResponsesStreamState) allocOutputIndex() int {
+	idx := s.nextOutputIndex
+	s.nextOutputIndex++
+	return idx
 }
 
 func (s *ResponsesStreamState) feedToolCallDelta(tc chatStreamToolCallDelta) [][]byte {
@@ -219,21 +241,16 @@ func (s *ResponsesStreamState) feedToolCallDelta(tc chatStreamToolCallDelta) [][
 	tcState, exists := s.toolCalls[idx]
 	if !exists {
 		tcState = &toolCallState{
-			itemID: s.respID + "_fc" + string(rune('0'+len(s.toolCalls))),
-			callID: tc.ID,
-			fnName: tc.Function.Name,
+			itemID:      s.respID + "_fc" + strconv.Itoa(len(s.toolCalls)),
+			callID:      tc.ID,
+			fnName:      tc.Function.Name,
+			outputIndex: s.allocOutputIndex(),
 		}
 		s.toolCalls[idx] = tcState
-		s.toolCallOrder = append(s.toolCallOrder, idx)
-
-		// Calculate output_index: message (if any) is 0, tool calls start after
-		outputIndex := len(s.toolCallOrder) - 1 // 0-based position in toolCallOrder
-		if s.messageStarted {
-			outputIndex++ // shift by 1 if message exists
-		}
+		s.itemOrder = append(s.itemOrder, idx)
 
 		events = append(events, s.emit("response.output_item.added", map[string]any{
-			"output_index": outputIndex,
+			"output_index": tcState.outputIndex,
 			"item": map[string]any{
 				"type": "function_call", "id": tcState.itemID, "call_id": tcState.callID,
 				"name": tcState.fnName, "arguments": "", "status": "in_progress",
@@ -243,19 +260,8 @@ func (s *ResponsesStreamState) feedToolCallDelta(tc chatStreamToolCallDelta) [][
 
 	if tc.Function.Arguments != "" {
 		tcState.argsBuf.WriteString(tc.Function.Arguments)
-		// Calculate output_index for this tool call
-		outputIndex := 0
-		for i, orderIdx := range s.toolCallOrder {
-			if orderIdx == idx {
-				outputIndex = i
-				if s.messageStarted {
-					outputIndex++
-				}
-				break
-			}
-		}
 		events = append(events, s.emit("response.function_call_arguments.delta", map[string]any{
-			"item_id": tcState.itemID, "output_index": outputIndex, "delta": tc.Function.Arguments,
+			"item_id": tcState.itemID, "output_index": tcState.outputIndex, "delta": tc.Function.Arguments,
 		}))
 	}
 	return events
@@ -271,49 +277,45 @@ func (s *ResponsesStreamState) finishItem() [][]byte {
 
 	var events [][]byte
 
-	// Finish message (text) if started
-	if s.messageStarted {
-		text := s.textBuf.String()
-		events = append(events, s.emit("response.output_text.done", map[string]any{
-			"item_id": s.messageID, "output_index": 0, "content_index": 0, "text": text,
-		}))
-		events = append(events, s.emit("response.content_part.done", map[string]any{
-			"item_id": s.messageID, "output_index": 0, "content_index": 0,
-			"part": map[string]any{"type": "output_text", "text": text, "annotations": []any{}},
-		}))
-		msgItem := map[string]any{
-			"type": "message", "id": s.messageID, "status": "completed", "role": "assistant",
-			"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
+	// Finish items in the order they actually started in the stream, so
+	// output_index in the *.done events matches what was assigned on
+	// output_item.added regardless of whether text or a tool call led.
+	for _, id := range s.itemOrder {
+		if id == -1 {
+			text := s.textBuf.String()
+			events = append(events, s.emit("response.output_text.done", map[string]any{
+				"item_id": s.messageID, "output_index": s.messageOutputIndex, "content_index": 0, "text": text,
+			}))
+			events = append(events, s.emit("response.content_part.done", map[string]any{
+				"item_id": s.messageID, "output_index": s.messageOutputIndex, "content_index": 0,
+				"part": map[string]any{"type": "output_text", "text": text, "annotations": []any{}},
+			}))
+			msgItem := map[string]any{
+				"type": "message", "id": s.messageID, "status": "completed", "role": "assistant",
+				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
+			}
+			events = append(events, s.emit("response.output_item.done", map[string]any{
+				"output_index": s.messageOutputIndex, "item": msgItem,
+			}))
+			s.finalItems = append(s.finalItems, msgItem)
+			continue
 		}
-		events = append(events, s.emit("response.output_item.done", map[string]any{
-			"output_index": 0, "item": msgItem,
-		}))
-		s.finalItems = append(s.finalItems, msgItem)
-	}
 
-	// Finish all tool calls in order
-	for i, idx := range s.toolCallOrder {
-		tcState := s.toolCalls[idx]
+		tcState := s.toolCalls[id]
 		args := tcState.argsBuf.String()
 		if args == "" {
 			args = "{}" // 上游普遍要求 arguments 是可解析的 JSON 字符串
 		}
 
-		// Calculate output_index for this tool call
-		outputIndex := i
-		if s.messageStarted {
-			outputIndex++
-		}
-
 		events = append(events, s.emit("response.function_call_arguments.done", map[string]any{
-			"item_id": tcState.itemID, "output_index": outputIndex, "arguments": args,
+			"item_id": tcState.itemID, "output_index": tcState.outputIndex, "arguments": args,
 		}))
 		fcItem := map[string]any{
 			"type": "function_call", "id": tcState.itemID, "call_id": tcState.callID,
 			"name": tcState.fnName, "arguments": args, "status": "completed",
 		}
 		events = append(events, s.emit("response.output_item.done", map[string]any{
-			"output_index": outputIndex, "item": fcItem,
+			"output_index": tcState.outputIndex, "item": fcItem,
 		}))
 		s.finalItems = append(s.finalItems, fcItem)
 	}
@@ -339,10 +341,7 @@ func (s *ResponsesStreamState) complete() []byte {
 				"code":    "upstream_error",
 				"message": s.failErr,
 			},
-			"usage": map[string]any{
-				"input_tokens": s.usageIn, "output_tokens": s.usageOut,
-				"total_tokens": s.usageIn + s.usageOut + s.usageReasoning,
-			},
+			"usage": s.usageMap(),
 		}
 		return s.emit("response.failed", map[string]any{"response": resp})
 	}
@@ -350,12 +349,24 @@ func (s *ResponsesStreamState) complete() []byte {
 	resp := map[string]any{
 		"id": s.respID, "object": "response", "model": s.model,
 		"status": "completed", "output": output,
-		"usage": map[string]any{
-			"input_tokens": s.usageIn, "output_tokens": s.usageOut,
-			"total_tokens": s.usageIn + s.usageOut + s.usageReasoning,
-		},
+		"usage": s.usageMap(),
 	}
 	return s.emit("response.completed", map[string]any{"response": resp})
+}
+
+// usageMap 构造 Responses usage 对象。reasoning_tokens 除了并入 total_tokens
+// 外，还按 OpenAI Responses 规范暴露在 output_tokens_details 里 —— 下游（如
+// codex）若要单独展示或计费 reasoning 明细，得从这个子字段读，不能只从
+// total_tokens 里反推。
+func (s *ResponsesStreamState) usageMap() map[string]any {
+	return map[string]any{
+		"input_tokens":  s.usageIn,
+		"output_tokens": s.usageOut,
+		"total_tokens":  s.usageIn + s.usageOut + s.usageReasoning,
+		"output_tokens_details": map[string]any{
+			"reasoning_tokens": s.usageReasoning,
+		},
+	}
 }
 
 // Usage 返回目前累计到的 token 计数，供调用方计费用 —— 上游是纯 Chat
