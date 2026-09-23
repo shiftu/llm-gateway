@@ -55,12 +55,23 @@ func parseBlockingUsage(body []byte, protocol string) capturedUsage {
 			ReasoningTokens: rt,
 			CachedTokens:    resp.Usage.PromptTokensDetails.CachedTokens,
 		}
+	case protocolTypeSafe:
+		var resp struct {
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal(body, &resp) != nil {
+			return capturedUsage{}
+		}
+		return capturedUsage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens}
 	case protocolAnthropic:
 		var resp struct {
 			Usage struct {
-				InputTokens         int `json:"input_tokens"`
-				OutputTokens        int `json:"output_tokens"`
-				CacheReadInputToks  int `json:"cache_read_input_tokens"`
+				InputTokens        int `json:"input_tokens"`
+				OutputTokens       int `json:"output_tokens"`
+				CacheReadInputToks int `json:"cache_read_input_tokens"`
 			} `json:"usage"`
 		}
 		if json.Unmarshal(body, &resp) != nil {

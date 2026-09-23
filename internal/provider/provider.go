@@ -46,6 +46,7 @@ type Provider struct {
 	Kind             string // e.g. "deepseek", "glm"
 	OpenAIBaseURL    string // empty if provider has no OpenAI-compat endpoint
 	AnthropicBaseURL string // empty if provider has no Anthropic-compat endpoint
+	TypeSafeBaseURL  string // versioned base URL, e.g. https://api.typesafe.ai/v1
 	APIKey           string
 	AnthropicVersion string // optional; defaults to DefaultAnthropicVersion
 
@@ -86,6 +87,22 @@ func (p *Provider) OpenAIRequest(ctx context.Context, body io.Reader) (*http.Res
 	}
 	req.Header.Set("Authorization", "Bearer "+p.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+	return p.client().Do(req)
+}
+
+// TypeSafeRequest calls the native, non-streaming System One evaluation API.
+// Like OpenAIBaseURL, TypeSafeBaseURL includes the version prefix.
+func (p *Provider) TypeSafeRequest(ctx context.Context, body io.Reader) (*http.Response, error) {
+	if p.TypeSafeBaseURL == "" {
+		return nil, ErrProtocolUnsupported
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(p.TypeSafeBaseURL, "/")+"/systemone", body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 	return p.client().Do(req)
 }
 

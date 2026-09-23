@@ -1,10 +1,11 @@
 package router
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/panda/llm-gateway/internal/store"
@@ -77,10 +78,16 @@ func (r *Router) Resolve(clientModel string) (Route, error) {
 //  3. Routing rules      (team-scoped then global, by priority)
 //  4. Global default provider (pass clientModel through)
 func (r *Router) ResolveForTeam(clientModel, teamID string) (Route, error) {
+	return r.ResolveForTeamProtocol(clientModel, teamID, "")
+}
+
+// ResolveForTeamProtocol restricts cognitive candidates to the inbound protocol.
+// Static targets are checked at dispatch, giving callers a protocol-specific error.
+func (r *Router) ResolveForTeamProtocol(clientModel, teamID, protocol string) (Route, error) {
 	// Tier 1: Alias hit
 	if alias, err := r.store.ResolveAliasForTeam(clientModel, teamID); err == nil {
 		if alias.Mode == "cognitive" && r.score != nil {
-			return r.resolveCognitive(alias, teamID)
+			return r.resolveCognitive(alias, teamID, protocol)
 		}
 		p, perr := r.store.GetProvider(alias.ProviderName)
 		if perr != nil {
@@ -196,7 +203,7 @@ func ruleName(r store.RoutingRule) string {
 // Returns Route with the chosen provider, the alias's UpstreamModel, and a
 // CognitiveTrace (candidates sorted by Total desc) so T5 explain-trace can
 // surface the decision to agents.
-func (r *Router) resolveCognitive(alias store.Alias, teamID string) (Route, error) {
+func (r *Router) resolveCognitive(alias store.Alias, teamID, protocol string) (Route, error) {
 	candidates, err := r.store.ListProviders()
 	if err != nil {
 		return Route{}, err
@@ -217,13 +224,19 @@ func (r *Router) resolveCognitive(alias store.Alias, teamID string) (Route, erro
 
 	cands := make([]Candidate, 0, len(candidates))
 	for _, p := range candidates {
+		if !SupportsProtocol(p, protocol) {
+			continue
+		}
 		inputs := r.score(p)
 		br := Score(inputs, weights)
 		cands = append(cands, Candidate{ProviderName: p.Name, Inputs: inputs, Breakdown: br})
 	}
+	if len(cands) == 0 {
+		return Route{}, fmt.Errorf("cognitive alias %q has no candidates for protocol %q: %w", alias.Alias, protocol, ErrNoRoute)
+	}
 	// Sort descending by Total.
-	sort.SliceStable(cands, func(i, j int) bool {
-		return cands[i].Breakdown.Total > cands[j].Breakdown.Total
+	slices.SortStableFunc(cands, func(a, b Candidate) int {
+		return cmp.Compare(b.Breakdown.Total, a.Breakdown.Total)
 	})
 
 	winnerName := cands[0].ProviderName

@@ -283,6 +283,7 @@ var knownProviderBaseURLs = map[string]string{
 	"anthropic": "https://api.anthropic.com/v1",
 	"qwen":      "https://dashscope.aliyuncs.com/compatible-mode/v1",
 	"moonshot":  "https://api.moonshot.cn/v1",
+	"typesafe":  "https://api.typesafe.ai/v1",
 }
 
 func addProviderWizardHandler() mcpserver.PromptHandlerFunc {
@@ -296,6 +297,12 @@ func addProviderWizardHandler() mcpserver.PromptHandlerFunc {
 			return nil, err
 		}
 		baseURL, known := knownProviderBaseURLs[kind]
+		if kind == "typesafe" {
+			return textPromptResult("Wizard to add a TypeSafe provider", fmt.Sprintf(`Register TypeSafe System One using add_provider with name="typesafe", kind="typesafe", api_key=<your provider key>, typesafe_base_url="%s".
+Then call set_model_alias with alias="evaluate", provider_name="typesafe", upstream_model="jev-latest", mode="static".
+Call POST /v1/systemone with model="evaluate", state and a non-empty questions object (noul, choice or score). Streaming and chat generation are unsupported.
+Verify registration with list_providers. Keep the existing chat default provider. Configure pricing with set_model_cost using your actual provider rates.`, baseURL)), nil
+		}
 		baseURLHint := ""
 		if known {
 			baseURLHint = fmt.Sprintf(" The standard base_url for %s is: %s", kind, baseURL)

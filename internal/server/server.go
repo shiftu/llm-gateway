@@ -65,6 +65,7 @@ func NewServer(token string, s *store.Store) *Server {
 	srv.mux.HandleFunc("/v1/chat/completions", srv.dispatchOpenAI)
 	srv.mux.HandleFunc("/v1/messages", srv.dispatchAnthropic)
 	srv.mux.HandleFunc("/v1/responses", srv.dispatchResponses)
+	srv.mux.HandleFunc("POST /v1/systemone", srv.dispatchTypeSafe)
 	srv.mux.HandleFunc("/v1/models", srv.handleModels)
 	srv.mountMonitoring()
 	return srv
@@ -107,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 const (
 	protocolOpenAI    = "openai"
 	protocolAnthropic = "anthropic"
+	protocolTypeSafe  = "typesafe"
 )
 
 func (s *Server) dispatchOpenAI(w http.ResponseWriter, r *http.Request) {
@@ -140,17 +142,29 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 			"resend the request; if it persists, check client-side body handling")
 		return
 	}
-	var body map[string]any
+	var body map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &body); err != nil {
 		writeStructuredError(w, http.StatusBadRequest, "invalid_json", err.Error(),
-			"send a JSON body matching OpenAI Chat Completions or Anthropic Messages shape")
+			"send a JSON object matching the requested endpoint's protocol")
 		return
 	}
-	clientModel, _ := body["model"].(string)
-	if clientModel == "" {
+	var clientModel string
+	_ = json.Unmarshal(body["model"], &clientModel)
+	if strings.TrimSpace(clientModel) == "" {
 		writeStructuredError(w, http.StatusBadRequest, "missing_model",
 			"request body must include a non-empty 'model' field", "set 'model' to a registered alias or upstream model name")
 		return
+	}
+	if protocol == protocolTypeSafe {
+		if err := validateSystemOne(body); err != nil {
+			writeStructuredError(w, http.StatusBadRequest, "invalid_systemone_request", err.Error(),
+				"send model, state and non-empty questions with noul, choice or score types; streaming is unsupported")
+			return
+		}
+		if _, exists := body["stream"]; exists {
+			delete(body, "stream") // false is accepted locally, not sent upstream
+			raw, _ = json.Marshal(body)
+		}
 	}
 
 	ak, hasKey := authpkg.APIKeyFromContext(r.Context())
@@ -159,7 +173,7 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		teamID = ak.TeamID
 	}
 
-	route, err := s.router.ResolveForTeam(clientModel, teamID)
+	route, err := s.router.ResolveForTeamProtocol(clientModel, teamID, protocol)
 	if err != nil {
 		writeStructuredError(w, http.StatusNotFound, "no_route", err.Error(),
 			"register a model alias via MCP set_model_alias, or set a default provider via set_default_provider")
@@ -168,7 +182,7 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 
 	bodyBytes := raw
 	if route.UpstreamModel != clientModel {
-		body["model"] = route.UpstreamModel
+		body["model"], _ = json.Marshal(route.UpstreamModel)
 		bodyBytes, _ = json.Marshal(body)
 	}
 
@@ -180,6 +194,7 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		Kind:             route.Provider.Kind,
 		OpenAIBaseURL:    route.Provider.OpenAIBaseURL,
 		AnthropicBaseURL: route.Provider.AnthropicBaseURL,
+		TypeSafeBaseURL:  route.Provider.TypeSafeBaseURL,
 		APIKey:           route.Provider.APIKey,
 		AnthropicVersion: route.Provider.AnthropicVersion,
 	}
@@ -205,16 +220,15 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		if trigger != "" && s.store != nil {
 			if policy, found, _ := s.store.GetEffectiveFallbackPolicy(trigger, teamID); found {
 				if next := router.NextFallbackProvider(policy, route.Cognitive, tried); next != "" {
-					if resp != nil {
+					if nextProv, err := s.store.GetProvider(next); err == nil && router.SupportsProtocol(nextProv, protocol) {
 						resp.Body.Close()
-					}
-					if nextProv, err := s.store.GetProvider(next); err == nil {
 						tried[next] = struct{}{}
 						currentProvider = &provider.Provider{
 							Name:             nextProv.Name,
 							Kind:             nextProv.Kind,
 							OpenAIBaseURL:    nextProv.OpenAIBaseURL,
 							AnthropicBaseURL: nextProv.AnthropicBaseURL,
+							TypeSafeBaseURL:  nextProv.TypeSafeBaseURL,
 							APIKey:           nextProv.APIKey,
 							AnthropicVersion: nextProv.AnthropicVersion,
 						}
@@ -242,8 +256,8 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		s.logRequest(rl)
 		if errors.Is(dispatchErr, provider.ErrProtocolUnsupported) {
 			writeStructuredError(w, http.StatusNotImplemented, "cross_protocol_not_supported",
-				fmt.Sprintf("provider %q has no %s base_url; IR translation not yet implemented", currentProvider.Name, protocol),
-				fmt.Sprintf("register the provider with %s_base_url set, or wait for Task 2b IR translation in v0.2", protocol))
+				fmt.Sprintf("provider %q has no %s base_url; this protocol cannot be translated", currentProvider.Name, protocol),
+				fmt.Sprintf("register a compatible provider with %s_base_url set and route this model to it", protocol))
 			return
 		}
 		writeUpstreamError(w, dispatchErr)
@@ -251,7 +265,13 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 	}
 	defer resp.Body.Close()
 
-	u := pipeAndCaptureUsage(w, resp, protocol)
+	var u capturedUsage
+	var responseErr error
+	if protocol == protocolTypeSafe {
+		u, responseErr = pipeSystemOneResponse(w, resp)
+	} else {
+		u = pipeAndCaptureUsage(w, resp, protocol)
+	}
 
 	rl := store.RequestLog{
 		ClientModel:      clientModel,
@@ -265,12 +285,20 @@ func (s *Server) routeAndForward(w http.ResponseWriter, r *http.Request, protoco
 		CachedTokens:     u.CachedTokens,
 		RouteTrace:       marshalCognitiveTrace(route.Cognitive),
 	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		rl.Status = "upstream_error"
+		rl.ErrorMsg = fmt.Sprintf("upstream status %d", resp.StatusCode)
+	}
+	if responseErr != nil {
+		rl.Status = "upstream_error"
+		rl.ErrorMsg = responseErr.Error()
+	}
 	if hasKey {
 		rl.APIKeyID = ak.ID
 		rl.TeamID = ak.TeamID
-		if s.store != nil {
+		if s.store != nil && rl.Status == "ok" {
 			dayUTC := truncateToDay(time.Now().UTC())
-			costMicros := calcCostMicros(s.store, route.Provider.Name, route.UpstreamModel, u)
+			costMicros := calcCostMicros(s.store, currentProvider.Name, route.UpstreamModel, u)
 			_ = s.store.CommitUsage(ak.ID, dayUTC,
 				int64(u.InputTokens), int64(u.OutputTokens), int64(u.ReasoningTokens),
 				int64(u.CachedTokens), costMicros)
@@ -285,6 +313,8 @@ func dispatchProtocol(ctx context.Context, p *provider.Provider, protocol string
 		return p.OpenAIRequest(ctx, body)
 	case protocolAnthropic:
 		return p.AnthropicRequest(ctx, body)
+	case protocolTypeSafe:
+		return p.TypeSafeRequest(ctx, body)
 	default:
 		return nil, fmt.Errorf("unknown protocol %q", protocol)
 	}

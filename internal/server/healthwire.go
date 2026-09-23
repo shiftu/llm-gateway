@@ -11,7 +11,8 @@ import (
 // health Manager. Probe URL = OpenAIBaseURL + "/models" — callers store the
 // full base URL (including any /v1 prefix) per OpenAI SDK convention, so the
 // gateway appends only the resource name. Providers without an OpenAI base
-// URL are skipped (Anthropic-only HEAD /v1/messages comes in a later cycle).
+// URL use TypeSafeBaseURL + "/models" if configured. Anthropic-only providers
+// are skipped (HEAD /v1/messages comes in a later cycle).
 //
 // Returns the count registered. Nil store is fine — stub-mode boot just
 // gets zero targets, no probing.
@@ -25,10 +26,14 @@ func RegisterHealthTargets(mgr *health.Manager, st *store.Store) (int, error) {
 	}
 	n := 0
 	for _, p := range providers {
-		if p.OpenAIBaseURL == "" {
+		baseURL := p.OpenAIBaseURL
+		if baseURL == "" {
+			baseURL = p.TypeSafeBaseURL
+		}
+		if baseURL == "" {
 			continue
 		}
-		mgr.Register(p.Name, strings.TrimRight(p.OpenAIBaseURL, "/")+"/models", p.APIKey)
+		mgr.Register(p.Name, strings.TrimRight(baseURL, "/")+"/models", p.APIKey)
 		n++
 	}
 	return n, nil

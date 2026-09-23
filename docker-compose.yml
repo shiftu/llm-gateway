@@ -18,6 +18,8 @@ services:
       # Optional: seed a provider on first start
       LLM_GATEWAY_PROVIDER_KIND: ${LLM_GATEWAY_PROVIDER_KIND:-deepseek}
       LLM_GATEWAY_PROVIDER_API_KEY: ${LLM_GATEWAY_PROVIDER_API_KEY:-}
+      LLM_GATEWAY_PROVIDER_NAME: ${LLM_GATEWAY_PROVIDER_NAME:-default}
+      LLM_GATEWAY_PROVIDER_TYPESAFE_BASE_URL: ${LLM_GATEWAY_PROVIDER_TYPESAFE_BASE_URL:-}
       # Optional: enable Prometheus metrics
       LLM_GATEWAY_ENABLE_METRICS: ${LLM_GATEWAY_ENABLE_METRICS:-0}
       # Optional: persist RPM counters across restarts

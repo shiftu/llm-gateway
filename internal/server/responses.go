@@ -71,7 +71,7 @@ func (s *Server) dispatchResponses(w http.ResponseWriter, r *http.Request) {
 		teamID = ak.TeamID
 	}
 
-	route, err := s.router.ResolveForTeam(clientModel, teamID)
+	route, err := s.router.ResolveForTeamProtocol(clientModel, teamID, protocolOpenAI)
 	if err != nil {
 		writeStructuredError(w, http.StatusNotFound, "no_route", err.Error(),
 			"register a model alias via MCP set_model_alias, or set a default provider via set_default_provider")

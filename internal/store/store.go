@@ -14,6 +14,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -24,7 +25,8 @@ import (
 )
 
 const (
-	// schemaVersion = 12: v12 adds usage_counters.cached_tokens so the daily
+	// v13 adds a separate TypeSafe System One endpoint and widens the URL constraint.
+	// v12 adds usage_counters.cached_tokens so the daily
 	// rollups carry prompt-cache hits (week/month usage summaries report cache rate).
 	// v11 added model_costs.usd_per_cached_1k and request_logs.cached_tokens
 	// for prompt-cache pricing (charaboard).
@@ -34,7 +36,7 @@ const (
 	// v7 added provider_capabilities (v0.3 T11).
 	// v6 added fallback_policies (v0.3 T4).
 	// v5 added request_logs.route_trace (v0.3 T5).
-	schemaVersion           = 12
+	schemaVersion           = 13
 	DefaultAnthropicVersion = "2023-06-01"
 )
 
@@ -356,6 +358,30 @@ ALTER TABLE request_logs ADD COLUMN cached_tokens     INTEGER;
 	`
 ALTER TABLE usage_counters ADD COLUMN cached_tokens INTEGER NOT NULL DEFAULT 0;
 `,
+	// Rebuild rather than storing a System One URL in a chat protocol column.
+	// applyMigrations disables FK actions while preserving dependent rows.
+	`
+CREATE TABLE providers_new (
+  name TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  openai_base_url TEXT,
+  anthropic_base_url TEXT,
+  typesafe_base_url TEXT,
+  api_key TEXT NOT NULL,
+  anthropic_version TEXT NOT NULL DEFAULT '2023-06-01',
+  is_default INTEGER NOT NULL DEFAULT 0,
+  team_id TEXT REFERENCES teams(id) ON DELETE CASCADE,
+  fallback_eligible INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  CHECK (openai_base_url IS NOT NULL OR anthropic_base_url IS NOT NULL OR typesafe_base_url IS NOT NULL)
+);
+INSERT INTO providers_new (name, kind, openai_base_url, anthropic_base_url,
+  api_key, anthropic_version, is_default, team_id, fallback_eligible, created_at)
+SELECT name, kind, openai_base_url, anthropic_base_url,
+  api_key, anthropic_version, is_default, team_id, fallback_eligible, created_at FROM providers;
+DROP TABLE providers;
+ALTER TABLE providers_new RENAME TO providers;
+`,
 }
 
 // applyMigrations brings the DB schema up to schemaVersion in a single
@@ -373,7 +399,19 @@ func applyMigrations(db *sql.DB) error {
 		return nil
 	}
 
-	tx, err := db.Begin()
+	// PRAGMA foreign_keys is connection-local and must change outside a txn.
+	// Pin the connection so rebuilding providers cannot cascade-delete aliases.
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, "PRAGMA foreign_keys = ON")
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration txn: %w", err)
 	}
@@ -393,6 +431,19 @@ func applyMigrations(db *sql.DB) error {
 	}
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("bump user_version: %w", err)
+	}
+	rows, err := tx.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	violated := rows.Next()
+	checkErr := rows.Err()
+	rows.Close()
+	if checkErr != nil {
+		return checkErr
+	}
+	if violated {
+		return fmt.Errorf("migration left a foreign key violation")
 	}
 	return tx.Commit()
 }
@@ -420,6 +471,7 @@ type Provider struct {
 	Kind             string
 	OpenAIBaseURL    string
 	AnthropicBaseURL string
+	TypeSafeBaseURL  string
 	APIKey           string
 	AnthropicVersion string
 	IsDefault        bool
@@ -444,10 +496,11 @@ func (s *Store) AddProvider(p Provider) error {
 	}
 
 	_, err := s.db.Exec(`INSERT INTO providers
-		(name, kind, openai_base_url, anthropic_base_url, api_key,
+		(name, kind, openai_base_url, anthropic_base_url, typesafe_base_url, api_key,
 		 anthropic_version, is_default, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Name, p.Kind, nullable(p.OpenAIBaseURL), nullable(p.AnthropicBaseURL),
+		nullable(p.TypeSafeBaseURL),
 		apiKey, av, boolInt(p.IsDefault), now)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -459,7 +512,7 @@ func (s *Store) AddProvider(p Provider) error {
 }
 
 func (s *Store) GetProvider(name string) (Provider, error) {
-	row := s.db.QueryRow(`SELECT name, kind, openai_base_url, anthropic_base_url,
+	row := s.db.QueryRow(`SELECT name, kind, openai_base_url, anthropic_base_url, typesafe_base_url,
 		api_key, anthropic_version, is_default, created_at
 		FROM providers WHERE name = ?`, name)
 	p, err := scanProvider(row)
@@ -470,7 +523,7 @@ func (s *Store) GetProvider(name string) (Provider, error) {
 }
 
 func (s *Store) ListProviders() ([]Provider, error) {
-	rows, err := s.db.Query(`SELECT name, kind, openai_base_url, anthropic_base_url,
+	rows, err := s.db.Query(`SELECT name, kind, openai_base_url, anthropic_base_url, typesafe_base_url,
 		api_key, anthropic_version, is_default, created_at
 		FROM providers ORDER BY name ASC`)
 	if err != nil {
@@ -508,7 +561,7 @@ func (s *Store) RemoveProvider(name string) error {
 // if none. Used by the router to pass through unknown model names to a
 // fallback provider.
 func (s *Store) GetDefaultProvider() (Provider, error) {
-	row := s.db.QueryRow(`SELECT name, kind, openai_base_url, anthropic_base_url,
+	row := s.db.QueryRow(`SELECT name, kind, openai_base_url, anthropic_base_url, typesafe_base_url,
 		api_key, anthropic_version, is_default, created_at
 		FROM providers WHERE is_default = 1 LIMIT 1`)
 	p, err := scanProvider(row)
@@ -851,9 +904,9 @@ type rowScanner interface {
 
 func scanProvider(r rowScanner) (Provider, error) {
 	var p Provider
-	var openai, anthropic sql.NullString
+	var openai, anthropic, typesafe sql.NullString
 	var isDefault, createdAt int64
-	err := r.Scan(&p.Name, &p.Kind, &openai, &anthropic, &p.APIKey,
+	err := r.Scan(&p.Name, &p.Kind, &openai, &anthropic, &typesafe, &p.APIKey,
 		&p.AnthropicVersion, &isDefault, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Provider{}, ErrNotFound
@@ -863,6 +916,7 @@ func scanProvider(r rowScanner) (Provider, error) {
 	}
 	p.OpenAIBaseURL = openai.String
 	p.AnthropicBaseURL = anthropic.String
+	p.TypeSafeBaseURL = typesafe.String
 	p.IsDefault = isDefault == 1
 	p.CreatedAt = time.UnixMilli(createdAt)
 	return p, nil

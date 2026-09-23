@@ -7,6 +7,9 @@ Routes requests from any OpenAI-compatible or Anthropic-compatible client to
 DeepSeek, GLM (Zhipu), and other providers — with bearer auth, per-key quotas,
 cost tracking, and audit logging built in.
 
+TypeSafe structured evaluations are available through the native
+`POST /v1/systemone` protocol. See [TypeSafe setup](docs/typesafe.md).
+
 ## Quick start
 
 ```sh
@@ -71,7 +74,7 @@ After pasting, restart your client. The gateway must be running (`llm-gateway st
 
 ## Sending requests
 
-The gateway accepts both inbound API flavours on the same port:
+The gateway accepts these inbound API protocols on the same port:
 
 **OpenAI-compatible**
 ```sh
@@ -88,6 +91,14 @@ curl http://127.0.0.1:7421/v1/messages \
   -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+**TypeSafe System One** (after registering the `evaluate` alias below)
+```sh
+curl http://127.0.0.1:7421/v1/systemone \
+  -H "Authorization: Bearer <gateway-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"evaluate","state":"Please refund the duplicate charge.","questions":{"refund":{"type":"noul","instructions":"Is the customer requesting a refund?"}}}'
 ```
 
 ## Provider setup
@@ -126,6 +137,32 @@ llm-gateway start
 
 For multiple providers, use the MCP `add_provider` tool from your agent chat after the
 gateway is running.
+
+**TypeSafe / System One**
+
+For an existing gateway, call MCP `add_provider` with:
+
+```json
+{
+  "name": "typesafe",
+  "kind": "typesafe",
+  "api_key": "<your-typesafe-api-key>",
+  "typesafe_base_url": "https://api.typesafe.ai/v1"
+}
+```
+
+Then call `set_model_alias` with
+`{"alias":"evaluate","provider_name":"typesafe","upstream_model":"jev-latest"}`.
+Keep your existing chat default provider. System One accepts `state` and typed
+`questions` (`noul`, `choice`, `score`); it does not support chat or streaming.
+The gateway base URL includes `/v1`; for OpenRouter use
+`https://openrouter.ai/api/v1` with an OpenRouter key and model ID.
+
+For a dedicated TypeSafe-only instance, seed via `LLM_GATEWAY_PROVIDER_KIND=typesafe`,
+`LLM_GATEWAY_PROVIDER_NAME=typesafe` and `LLM_GATEWAY_PROVIDER_API_KEY`.
+The native base URL defaults to `https://api.typesafe.ai/v1`, and requests can use
+`model: "jev-latest"` directly. See [the setup and verification guide](docs/typesafe.md)
+for full examples and the opt-in live test.
 
 ## Multi-tenant teams
 
@@ -479,6 +516,7 @@ Six preset operation prompts available via `prompts/get`:
 | `LLM_GATEWAY_PROVIDER_KIND` | `deepseek` | Provider kind (`deepseek`, `glm`, …) |
 | `LLM_GATEWAY_PROVIDER_OPENAI_BASE_URL` | (kind default) | Override OpenAI-compat base URL |
 | `LLM_GATEWAY_PROVIDER_ANTHROPIC_BASE_URL` | (kind default) | Override Anthropic-compat base URL |
+| `LLM_GATEWAY_PROVIDER_TYPESAFE_BASE_URL` | `https://api.typesafe.ai/v1` for TypeSafe-only seed | TypeSafe System One base URL, including `/v1` |
 | `LLM_GATEWAY_NO_STORE` | — | Set to `1` to run in stub mode (no SQLite) |
 | `LLM_GATEWAY_PERSIST_RPM` | — | Set to `1` to persist RPM counters to SQLite (v0.2) |
 | `LLM_GATEWAY_DB` | `./data/llm-gateway.db` | SQLite database path |

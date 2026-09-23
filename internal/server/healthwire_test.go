@@ -23,6 +23,7 @@ func TestRegisterHealthTargets(t *testing.T) {
 	mustAdd(t, st, store.Provider{Name: "deepseek", Kind: "deepseek", OpenAIBaseURL: "https://api.deepseek.com", APIKey: "k1"})
 	mustAdd(t, st, store.Provider{Name: "qwen", Kind: "qwen", OpenAIBaseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", APIKey: "k2"})
 	mustAdd(t, st, store.Provider{Name: "anthr-only", Kind: "anthropic", AnthropicBaseURL: "https://api.anthropic.com", APIKey: "k3"})
+	mustAdd(t, st, store.Provider{Name: "typesafe", Kind: "typesafe", TypeSafeBaseURL: "https://api.typesafe.ai/v1/", APIKey: "k4"})
 
 	type call struct{ url, token string }
 	var probed []call
@@ -36,18 +37,19 @@ func TestRegisterHealthTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterHealthTargets: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("registered count: want 2 (deepseek + glm; anthr-only skipped), got %d", n)
+	if n != 3 {
+		t.Errorf("registered count: want 3 (deepseek + qwen + typesafe; anthr-only skipped), got %d", n)
 	}
 
 	// Drive one bootstrap sweep so we can read back the URLs and tokens probed.
 	if err := mgr.Bootstrap(context.Background()); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	if len(probed) != 2 {
-		t.Fatalf("probed calls: want 2, got %d (%v)", len(probed), probed)
+	if len(probed) != 3 {
+		t.Fatalf("probed calls: want 3, got %d (%v)", len(probed), probed)
 	}
 	wantCalls := map[string]string{
+		"https://api.typesafe.ai/v1/models": "k4",
 		// DeepSeek stores base URL without /v1; probe appends /models directly.
 		"https://api.deepseek.com/models": "k1",
 		// Qwen follows OpenAI SDK convention: base URL includes /v1.

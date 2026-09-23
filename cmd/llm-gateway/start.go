@@ -208,7 +208,11 @@ func seedProviderFromEnv(st *store.Store) error {
 	}
 	openaiURL := os.Getenv("LLM_GATEWAY_PROVIDER_OPENAI_BASE_URL")
 	anthropicURL := os.Getenv("LLM_GATEWAY_PROVIDER_ANTHROPIC_BASE_URL")
-	if openaiURL == "" && anthropicURL == "" && kind == "deepseek" {
+	typesafeURL := os.Getenv("LLM_GATEWAY_PROVIDER_TYPESAFE_BASE_URL")
+	if openaiURL == "" && anthropicURL == "" && typesafeURL == "" && kind == "typesafe" {
+		typesafeURL = "https://api.typesafe.ai/v1"
+	}
+	if openaiURL == "" && anthropicURL == "" && typesafeURL == "" && kind == "deepseek" {
 		openaiURL = "https://api.deepseek.com"
 		anthropicURL = "https://api.deepseek.com/anthropic"
 	}
@@ -217,6 +221,7 @@ func seedProviderFromEnv(st *store.Store) error {
 		Name: name, Kind: kind,
 		OpenAIBaseURL:    openaiURL,
 		AnthropicBaseURL: anthropicURL,
+		TypeSafeBaseURL:  typesafeURL,
 		APIKey:           apiKey,
 		IsDefault:        true,
 	})

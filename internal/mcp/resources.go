@@ -173,12 +173,12 @@ func dayStartUTC(t time.Time) time.Time {
 // --- lgw://teams/{id}/quota ---
 
 type quotaJSON struct {
-	ScopeKind    string  `json:"scope_kind"`
-	ScopeID      string  `json:"scope_id"`
-	Window       string  `json:"window"`
-	MaxRequests  *int64  `json:"max_requests"`
-	MaxTokens    *int64  `json:"max_tokens"`
-	MaxUSDMicros *int64  `json:"max_usd_micros"`
+	ScopeKind    string `json:"scope_kind"`
+	ScopeID      string `json:"scope_id"`
+	Window       string `json:"window"`
+	MaxRequests  *int64 `json:"max_requests"`
+	MaxTokens    *int64 `json:"max_tokens"`
+	MaxUSDMicros *int64 `json:"max_usd_micros"`
 }
 
 func quotaToJSON(q store.Quota) quotaJSON {
@@ -219,6 +219,7 @@ type providerInfoJSON struct {
 	Kind            string `json:"kind"`
 	HasOpenAIURL    bool   `json:"has_openai_url"`
 	HasAnthropicURL bool   `json:"has_anthropic_url"`
+	HasTypeSafeURL  bool   `json:"has_typesafe_url"`
 	IsDefault       bool   `json:"is_default"`
 }
 
@@ -240,6 +241,7 @@ func providersHandler(st *store.Store) mcpserver.ResourceTemplateHandlerFunc {
 				Kind:            p.Kind,
 				HasOpenAIURL:    p.OpenAIBaseURL != "",
 				HasAnthropicURL: p.AnthropicBaseURL != "",
+				HasTypeSafeURL:  p.TypeSafeBaseURL != "",
 				IsDefault:       p.IsDefault,
 			}
 		}

@@ -6,9 +6,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/panda/llm-gateway/internal/store"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/panda/llm-gateway/internal/store"
 )
 
 // RegisterProviderTools adds the 7 provider + model-alias management tools
@@ -17,12 +17,13 @@ import (
 func RegisterProviderTools(s *mcpserver.MCPServer, st *store.Store) {
 	s.AddTool(
 		mcplib.NewTool("add_provider",
-			mcplib.WithDescription("Add an upstream LLM provider. At least one of openai_base_url or anthropic_base_url is required."),
+			mcplib.WithDescription("Add an upstream provider. At least one of openai_base_url, anthropic_base_url or typesafe_base_url is required."),
 			mcplib.WithString("name", mcplib.Required(), mcplib.Description("Unique provider slug, e.g. 'deepseek' or 'glm-prod'")),
-			mcplib.WithString("kind", mcplib.Required(), mcplib.Description("Provider kind: deepseek | glm | openai | anthropic | custom")),
+			mcplib.WithString("kind", mcplib.Required(), mcplib.Description("Provider kind: deepseek | glm | openai | anthropic | typesafe | custom")),
 			mcplib.WithString("api_key", mcplib.Required(), mcplib.Description("Provider API key (stored plaintext, chmod-600 config dir)")),
 			mcplib.WithString("openai_base_url", mcplib.Description("OpenAI-compat base URL, e.g. https://api.deepseek.com")),
 			mcplib.WithString("anthropic_base_url", mcplib.Description("Anthropic-compat base URL, e.g. https://api.deepseek.com/anthropic")),
+			mcplib.WithString("typesafe_base_url", mcplib.Description("TypeSafe System One base URL including /v1, e.g. https://api.typesafe.ai/v1 (OpenRouter: https://openrouter.ai/api/v1)")),
 			mcplib.WithString("anthropic_version", mcplib.Description("anthropic-version header value (default: 2023-06-01)")),
 			mcplib.WithBoolean("is_default", mcplib.Description("Make this the default provider for unrouted requests")),
 		),
@@ -112,6 +113,7 @@ func addProviderHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			APIKey:           apiKey,
 			OpenAIBaseURL:    req.GetString("openai_base_url", ""),
 			AnthropicBaseURL: req.GetString("anthropic_base_url", ""),
+			TypeSafeBaseURL:  req.GetString("typesafe_base_url", ""),
 			AnthropicVersion: req.GetString("anthropic_version", ""),
 			IsDefault:        req.GetBool("is_default", false),
 		}
@@ -167,6 +169,7 @@ func listProvidersHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 			Kind             string `json:"kind"`
 			OpenAIBaseURL    string `json:"openai_base_url,omitempty"`
 			AnthropicBaseURL string `json:"anthropic_base_url,omitempty"`
+			TypeSafeBaseURL  string `json:"typesafe_base_url,omitempty"`
 			APIKey           string `json:"api_key"`
 			IsDefault        bool   `json:"is_default"`
 		}
@@ -177,6 +180,7 @@ func listProvidersHandler(st *store.Store) mcpserver.ToolHandlerFunc {
 				Kind:             p.Kind,
 				OpenAIBaseURL:    p.OpenAIBaseURL,
 				AnthropicBaseURL: p.AnthropicBaseURL,
+				TypeSafeBaseURL:  p.TypeSafeBaseURL,
 				APIKey:           maskKey(p.APIKey),
 				IsDefault:        p.IsDefault,
 			}
