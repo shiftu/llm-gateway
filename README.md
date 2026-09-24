@@ -542,6 +542,14 @@ docker build -t llm-gateway .
 # docker buildx build --platform linux/amd64,linux/arm64 -t llm-gateway .
 ```
 
+### Release planning
+
+See [the release plan](docs/release-plan.md) for the proposed asset naming,
+checksum-verified installation, GitHub draft releases, and launchctl upgrades
+with database backups. This is a design plan; the current `make release` still
+publishes through GoReleaser, and the proposed install/update commands are not
+implemented yet.
+
 ## Migration from v0.1 → v0.2
 
 v0.2 is backward-compatible — no data migration is required.
